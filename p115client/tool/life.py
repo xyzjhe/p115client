@@ -226,7 +226,7 @@ def iter_life_behavior_once(
     """拉取一组 115 生活操作事件
 
     .. note::
-        当你指定有 ``from_id > 0`` 时，如果 from_time 为 0，则自动重设为 -1
+        当你指定有 ``from_id != 0`` 时，如果 from_time 为 0，则自动重设为 -1
 
     .. caution::
         115 并没有收集 复制文件 和 文件改名 的事件，以及第三方上传可能会没有 上传事件 ("upload_image_file" 和 "upload_file")
@@ -341,7 +341,7 @@ def iter_life_behavior(
     """持续拉取 115 生活操作事件
 
     .. note::
-        当你指定有 ``from_id > 0`` 时，如果 from_time 为 0，则自动重设为 -1
+        当你指定有 ``from_id != 0`` 时，如果 from_time 为 0，则自动重设为 -1
 
     .. caution::
         115 并没有收集 复制文件 和 文件改名 的事件，以及第三方上传可能会没有 上传事件 ("upload_image_file" 和 "upload_file")
@@ -447,7 +447,7 @@ def iter_life_behavior_list(
     """持续拉取 115 生活操作事件列表
 
     .. note::
-        当你指定有 ``from_id > 0`` 时，如果 from_time 为 0，则自动重设为 -1
+        当你指定有 ``from_id != 0`` 时，如果 from_time 为 0，则自动重设为 -1
 
     .. caution::
         115 并没有收集 复制文件 和 文件改名 的事件，以及第三方上传可能会没有 上传事件 ("upload_image_file" 和 "upload_file")

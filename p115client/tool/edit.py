@@ -5,12 +5,14 @@ __author__ = "ChenyangGao <https://chenyanggao.github.io>"
 __all__ = [
     "update_abstract", "update_desc", "update_star", "update_label", "update_score", 
     "update_top", "update_show_play_long", "update_category_shortcut", "batch_unstar", 
-    "update_name", "post_event", 
+    "update_name", "post_event", "batch_makedir", 
 ]
 __doc__ = "这个模块提供了一些和修改文件或目录信息有关的函数"
 
 from asyncio import Future as AsyncFuture
-from collections.abc import AsyncIterable, Callable, Coroutine, Iterable
+from collections.abc import (
+    AsyncIterable, AsyncIterator, Callable, Coroutine, Iterable, Iterator, 
+)
 from concurrent.futures import Future
 from functools import partial
 from itertools import batched
@@ -728,7 +730,7 @@ def post_event(
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
-):
+) -> None:
     ...
 @overload
 def post_event(
@@ -755,7 +757,7 @@ def post_event(
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
-):
+) -> None | Coroutine:
     """批量将文件或目录推送事件
 
     .. note::
@@ -795,5 +797,88 @@ def post_event(
             async_=async_, 
         ))
     return run_gen_step(gen_step, async_)
+
+
+@overload
+def batch_makedir(
+    client: str | PathLike | P115Client, 
+    pairs: Iterable[str | tuple[int | str, str]], 
+    /, 
+    pid: int | str = 0, 
+    contain_dir: bool = False, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[False] = False, 
+    **request_kwargs, 
+) -> Iterator[tuple[str | tuple[int | str, str], dict]]:
+    ...
+@overload
+def batch_makedir(
+    client: str | PathLike | P115Client, 
+    pairs: Iterable[str | tuple[int | str, str]], 
+    /, 
+    pid: int | str = 0, 
+    contain_dir: bool = False, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[True], 
+    **request_kwargs, 
+) -> AsyncIterator[tuple[str | tuple[int | str, str], dict]]:
+    ...
+def batch_makedir(
+    client: str | PathLike | P115Client, 
+    pairs: Iterable[str | tuple[int | str, str]], 
+    /, 
+    pid: int | str = 0, 
+    contain_dir: bool = False, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[False, True] = False, 
+    **request_kwargs, 
+) -> Iterator[tuple[str | tuple[int | str, str], dict]] | AsyncIterator[tuple[str | tuple[int | str, str], dict]]:
+    """批量创建目录
+
+    :param client: 115 客户端或 cookies
+    :param pairs: 一系列的 **名字或相对路径** 或者 (**目录的 id 或 pickcode**, **名字或相对路径**) 的 2 元组
+    :param pid: 目录的 id 或 pickcode，如果输入的是 **名字或相对路径**，则创建在此目录下
+    :param contain_dir: 如果为 True，则要创建的是相对路径，否则就是一个文件（即使其中包含 "/"）
+    :param max_workers: 并发工作数，如果为 None 或者 <= 0，则自动确定
+    :param async_: 是否异步
+    :param request_kwargs: 其它请求参数
+
+    :return: 迭代器，产生 (**每项输入**, **相应的接口响应**) 的 2 元组
+    """
+    if isinstance(client, (str, PathLike)):
+        client = P115Client(client, check_for_relogin=True)
+    pid = to_id(pid)
+    if contain_dir:
+        makedir = client.fs_makedirs_app
+    else:
+        makedir = client.fs_mkdir_app
+    call: Callable
+    if async_:
+        async def call[T: (str, tuple[int | str, str])](pair: T, /) -> tuple[T, dict]:
+            if isinstance(pair, tuple):
+                cid, name = pair
+                cid = to_id(cid)
+            else:
+                cid = pid
+                name = pair
+            return pair, await makedir(name, pid=cid, async_=True, **request_kwargs)
+    else:
+        def call[T: (str, tuple[int | str, str])](pair: T, /) -> tuple[T, dict]:
+            if isinstance(pair, tuple):
+                cid, name = pair
+                cid = to_id(cid)
+            else:
+                cid = pid
+                name = pair
+            return pair, makedir(name, pid=cid, **request_kwargs)
+    return conmap(
+        call, # type: ignore
+        pairs, 
+        max_workers=max_workers, 
+        async_=async_, # type: ignore
+    )
 
 # TODO: 上面这些，有些要支持 open 接口

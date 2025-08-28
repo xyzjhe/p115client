@@ -79,7 +79,7 @@ def iter_history_once(
     """拉取一组 115 的历史记录
 
     .. note::
-        当你指定有 ``from_id > 0`` 时，如果 from_time 为 0，则自动重设为 -1
+        当你指定有 ``from_id != 0`` 时，如果 from_time 为 0，则自动重设为 -1
 
     :param client: 115 客户端或 cookies
     :param from_id: 开始的事件 id （不含）
@@ -199,7 +199,7 @@ def iter_history(
     """持续拉取 115 的历史记录
 
     .. note::
-        当你指定有 ``from_id > 0`` 时，如果 from_time 为 0，则自动重设为 -1
+        当你指定有 ``from_id != 0`` 时，如果 from_time 为 0，则自动重设为 -1
 
     :param client: 115 客户端或 cookies
     :param from_id: 开始的事件 id （不含）
@@ -311,7 +311,7 @@ def iter_history_list(
     """持续拉取 115 的历史记录
 
     .. note::
-        当你指定有 ``from_id > 0`` 时，如果 from_time 为 0，则自动重设为 -1
+        当你指定有 ``from_id != 0`` 时，如果 from_time 为 0，则自动重设为 -1
 
     :param client: 115 客户端或 cookies
     :param from_id: 开始的事件 id （不含）

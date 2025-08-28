@@ -2,7 +2,7 @@
 # encoding: utf-8
 
 __author__ = "ChenyangGao <https://chenyanggao.github.io>"
-__all__ = ["updatedb", "updatedb_life_iter", "updatedb_history_iter"]
+__all__ = ["updatedb_initdb", "updatedb_life_iter", "updatedb_history_iter"]
 __doc__ = "这个模块提供了一些和更新数据库有关的函数"
 
 from collections.abc import AsyncIterator, Coroutine, Iterator
@@ -29,7 +29,9 @@ from .life import iter_life_behavior_list
 from .history import iter_history_list
 
 
-def initdb(con: Connection | Cursor, /) -> Cursor:
+def updatedb_initdb(con: Connection | Cursor, /) -> Cursor:
+    """初始化数据库，然后返回游标
+    """
     sql = """\
 -- 修改日志模式为 WAL (Write Ahead Log)
 PRAGMA journal_mode = WAL;
@@ -111,7 +113,7 @@ def _init_client(
             timeout=inf, 
             uri=isinstance(dbfile, str) and dbfile.startswith("file:"), 
         )
-        initdb(con)
+        updatedb_initdb(con)
     return client, con
 
 
@@ -334,7 +336,8 @@ def updatedb_life_iter(
     """持续采集 115 生活日志，以更新 SQLite 数据库
 
     .. note::
-        当 ``from_id=-1`` 且 ``from_time=0`` 时，会从数据库获取最大 id 作为 ``from_id``，并设置``from_time=-1``
+        当 ``from_id < 0`` 时，会从数据库获取最大 id 作为 ``from_id``，获取不到时设为 0。
+        当 ``from_time != 0`` 时，如果 from_time 为 0，则自动重设为 -1。
 
     :param client: 115 网盘客户端对象
     :param dbfile: 数据库文件路径，如果为 None，则自动确定
@@ -447,7 +450,8 @@ def updatedb_history_iter(
     """持续采集 115 历史记录，以更新 SQLite 数据库
 
     .. note::
-        当 ``from_id=-1`` 且 ``from_time=0`` 时，会从数据库获取最大 id 作为 ``from_id``，并设置``from_time=-1``
+        当 ``from_id < 0`` 时，会从数据库获取最大 id 作为 ``from_id``，获取不到时设为 0。
+        当 ``from_time != 0`` 时，如果 from_time 为 0，则自动重设为 -1。
 
     :param client: 115 网盘客户端对象
     :param dbfile: 数据库文件路径，如果为 None，则自动确定
