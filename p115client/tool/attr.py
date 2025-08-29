@@ -104,10 +104,13 @@ def get_attr(
     return run_gen_step(gen_step, async_)
 
 
-def type_of_attr(attr: Mapping, /) -> int:
+def type_of_attr(attr: str | Mapping, /) -> int:
     """推断文件信息所属类型（试验版，未必准确）
 
-    :param attr: 文件信息
+    .. note::
+        如果直接传入文件名，则视为文件，在获取不到时，返回 99（如果你已知这是目录，你直接自己就能计作 0）
+
+    :param attr: 文件名或文件信息
 
     :return: 返回类型代码
 
@@ -121,6 +124,13 @@ def type_of_attr(attr: Mapping, /) -> int:
         - 7: 书籍
         - 99: 其它文件
 """
+    if not attr:
+        return 0
+    if isinstance(attr, str):
+        suffix = splitext(attr)[1]
+        if not suffix:
+            return 99
+        return SUFFIX_TO_TYPE.get(suffix, 99)
     if attr.get("is_dir"):
         return 0
     type: None | int

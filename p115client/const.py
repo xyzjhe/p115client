@@ -6,8 +6,8 @@ from __future__ import annotations
 __author__ = "ChenyangGao <https://chenyanggao.github.io>"
 __all__ = [
     "AVAILABLE_APPS", "APP_TO_SSOENT", "SSOENT_TO_APP", "CLIENT_METHOD_API_MAP", 
-    "CLIENT_API_METHODS_MAP", "CLASS_TO_TYPE", "SUFFIX_TO_TYPE", "ID_TO_DIRNODE_CACHE", 
-    "WEPAPI_PREFIXES", 
+    "CLIENT_API_METHODS_MAP", "CLASS_TO_TYPE", "SUFFIX_TO_TYPE", "TYPE_TO_SUFFIXES", 
+    "ID_TO_DIRNODE_CACHE", "WEPAPI_PREFIXES", 
 ]
 
 from collections.abc import Iterator, MutableMapping
@@ -16,6 +16,7 @@ from threading import Lock
 from typing import Final
 
 from orjson import dumps, loads
+from iter_collect import grouped_mapping
 from sqlitedict import SqliteDict
 
 
@@ -169,6 +170,7 @@ SUFFIX_TO_TYPE: Final[dict[str, int]] = {
     ".amr": 3, 
     ".ape": 3, 
     ".au": 3, 
+    ".f4a": 3, 
     ".flac": 3, 
     ".m4a": 3, 
     ".mid": 3, 
@@ -230,6 +232,11 @@ SUFFIX_TO_TYPE: Final[dict[str, int]] = {
     ".mobi": 7, 
     ".prc": 7, 
 }
+
+#: 文件类型的整数代码对应的扩展名元组
+TYPE_TO_SUFFIXES: Final[dict[int, tuple[str, ...]]] = {
+    k: tuple(v) for k, v in grouped_mapping(
+        (v, k) for k, v in SUFFIX_TO_TYPE.items()).items()}
 
 from .type import DirNode
 

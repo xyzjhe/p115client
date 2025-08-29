@@ -2,7 +2,7 @@
 # encoding: utf-8
 
 __author__ = "ChenyangGao <https://chenyanggao.github.io>"
-__all__ = ["updatedb_initdb", "updatedb_life_iter", "updatedb_history_iter"]
+__all__ = ["updatedb_initdb", "updatedb", "updatedb_life_iter", "updatedb_history_iter"]
 __doc__ = "这个模块提供了一些和更新数据库有关的函数"
 
 from collections.abc import AsyncIterator, Coroutine, Iterator
@@ -47,22 +47,22 @@ CREATE TABLE IF NOT EXISTS data (
     is_dir INTEGER NOT NULL DEFAULT 1 CHECK(is_dir IN (0, 1)), -- 是否目录
     is_alive INTEGER NOT NULL DEFAULT 1 CHECK(is_alive IN (0, 1)), -- 是否存活（存活即是不是删除状态）
     extra BLOB DEFAULT NULL,              -- 额外的数据
-    created_at TIMESTAMP DEFAULT (STRFTIME('%s', 'now')), -- 创建时间
-    updated_at TIMESTAMP DEFAULT (STRFTIME('%s', 'now'))  -- 更新时间
+    created_at TIMESTAMP DEFAULT ((julianday('now') - 2440587.5) * 86400), -- 创建时间
+    updated_at TIMESTAMP DEFAULT (CAST(STRFTIME('%s', 'now') AS INTEGER))  -- 更新时间
 );
 
 -- life 表，用来保存操作事件
 CREATE TABLE IF NOT EXISTS life (
     id INTEGER NOT NULL PRIMARY KEY, -- 文件或目录的 id
     data JSON NOT NULL, -- 数据
-    created_at TIMESTAMP DEFAULT (STRFTIME('%s', 'now')) -- 创建时间
+    created_at TIMESTAMP DEFAULT ((julianday('now') - 2440587.5) * 86400) -- 创建时间
 );
 
 -- history 表，用来保存历史记录
 CREATE TABLE IF NOT EXISTS history (
     id INTEGER NOT NULL PRIMARY KEY, -- 文件或目录的 id
     data JSON NOT NULL, -- 数据
-    created_at TIMESTAMP DEFAULT (STRFTIME('%s', 'now')) -- 创建时间
+    created_at TIMESTAMP DEFAULT ((julianday('now') - 2440587.5) * 86400) -- 创建时间
 );
 
 -- 索引
@@ -77,7 +77,67 @@ BEGIN
     SELECT CASE
         WHEN NEW.updated_at < OLD.updated_at THEN RAISE(IGNORE)
     END;
-    UPDATE data SET updated_at = STRFTIME('%s', 'now') WHERE id = NEW.id AND NEW.updated_at = OLD.updated_at;
+    UPDATE data SET updated_at = CAST(STRFTIME('%s', 'now') AS INTEGER) WHERE id = NEW.id AND NEW.updated_at = OLD.updated_at;
+END;
+
+-- fs_event 表，用来保存文件系统变更（由 data 表触发）
+CREATE TABLE IF NOT EXISTS fs_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, -- 事件 id
+    event TEXT NOT NULL,                  -- 事件类型：add（增）、remove（删）、rename（改名）、move（移动）
+    file_id INTEGER NOT NULL,             -- 文件或目录的 id，此 id 必在 `data` 表中
+    pid0 INTEGER NOT NULL DEFAULT -1,     -- 变更前上级目录的 id
+    pid1 INTEGER NOT NULL DEFAULT -1,     -- 变更后上级目录的 id
+    name0 TEXT NOT NULL DEFAULT '',       -- 变更前的名字
+    name1 TEXT NOT NULL DEFAULT '',       -- 变更后的名字
+    created_at TIMESTAMP DEFAULT ((julianday('now') - 2440587.5) * 86400) -- 创建时间
+);
+
+-- data 表发生插入
+CREATE TRIGGER IF NOT EXISTS trg_data_insert
+AFTER INSERT ON data
+FOR EACH ROW
+BEGIN
+    INSERT INTO fs_event(event, file_id, pid1, name1) VALUES (
+        'add', NEW.id, NEW.parent_id, NEW.name
+    );
+END;
+
+-- data 表发生还原
+CREATE TRIGGER IF NOT EXISTS trg_data_revoke
+AFTER UPDATE ON data
+FOR EACH ROW WHEN (NOT OLD.is_alive AND NEW.is_alive)
+BEGIN
+    INSERT INTO fs_event(event, file_id, pid1, name1) VALUES (
+        'add', NEW.id, NEW.parent_id, NEW.name
+    );
+END;
+
+-- data 表发生移除
+CREATE TRIGGER IF NOT EXISTS trg_data_remove
+AFTER UPDATE ON data
+FOR EACH ROW WHEN (OLD.is_alive AND NOT NEW.is_alive)
+BEGIN
+    INSERT INTO fs_event(event, file_id, pid0, name0) VALUES (
+        'remove', OLD.id, OLD.parent_id, OLD.name
+    );
+END;
+
+-- data 表发生改名或移动
+CREATE TRIGGER IF NOT EXISTS trg_data_change
+AFTER UPDATE ON data
+FOR EACH ROW WHEN (OLD.is_alive AND NEW.is_alive)
+BEGIN
+    INSERT INTO fs_event(event, file_id, pid0, pid1, name0, name1)
+    SELECT
+        'move', OLD.id, OLD.parent_id, NEW.parent_id, OLD.name, OLD.name
+    WHERE OLD.parent_id != NEW.parent_id;
+
+    INSERT INTO fs_event(event, file_id, pid0, pid1, name0, name1) 
+    SELECT * FROM (
+        SELECT
+            'rename', NEW.id, NEW.parent_id, NEW.parent_id, OLD.name, NEW.name
+        WHERE OLD.name != NEW.name
+    );
 END;"""
     return con.executescript(sql)
 
@@ -259,7 +319,10 @@ def updatedb(
                 **request_kwargs, 
             )
             if ancestors:
-                total += (yield upsert(con, ancestors, {"is_alive": 1}, commit=True)).rowcount
+                if ancestors[0]["id"] == 0:
+                    ancestors = ancestors[1:]
+                if ancestors:
+                    total += (yield upsert(con, ancestors, {"is_alive": 1}, commit=True)).rowcount
         with with_iter_next(chunked(
             traverse_tree(
                 client, 
@@ -276,14 +339,14 @@ def updatedb(
                 total += (yield upsert(con, batch, {"is_alive": 1}, commit=True)).rowcount
         if cid:
             clean_sql = f"""\
-    UPDATE data SET is_alive = 0 WHERE id in (
-        WITH ids(id) AS (
-            SELECT id FROM data WHERE parent_id = {cid} AND is_alive AND updated_at < :start_t
-            UNION ALL
-            SELECT data.id FROM ids JOIN data ON (ids.id = data.parent_id) WHERE is_alive AND updated_at < :start_t
-        )
-        SELECT id FROM ids
-    );"""
+UPDATE data SET is_alive = 0 WHERE id in (
+    WITH ids(id) AS (
+        SELECT id FROM data WHERE parent_id = {cid} AND is_alive AND updated_at < :start_t
+        UNION ALL
+        SELECT data.id FROM ids JOIN data ON (ids.id = data.parent_id) WHERE is_alive AND updated_at < :start_t
+    )
+    SELECT id FROM ids
+);"""
         else:
             clean_sql = "UPDATE data SET is_alive = 0 WHERE is_alive AND updated_at < :start_t"
         total += (yield wrap_async(execute, async_, threaded=True)(
@@ -337,7 +400,7 @@ def updatedb_life_iter(
 
     .. note::
         当 ``from_id < 0`` 时，会从数据库获取最大 id 作为 ``from_id``，获取不到时设为 0。
-        当 ``from_time != 0`` 时，如果 from_time 为 0，则自动重设为 -1。
+        当 ``from_id != 0`` 时，如果 from_time 为 0，则自动重设为 -1。
 
     :param client: 115 网盘客户端对象
     :param dbfile: 数据库文件路径，如果为 None，则自动确定
@@ -451,7 +514,7 @@ def updatedb_history_iter(
 
     .. note::
         当 ``from_id < 0`` 时，会从数据库获取最大 id 作为 ``from_id``，获取不到时设为 0。
-        当 ``from_time != 0`` 时，如果 from_time 为 0，则自动重设为 -1。
+        当 ``from_id != 0`` 时，如果 from_time 为 0，则自动重设为 -1。
 
     :param client: 115 网盘客户端对象
     :param dbfile: 数据库文件路径，如果为 None，则自动确定
