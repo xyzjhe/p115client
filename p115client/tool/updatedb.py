@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS data (
     is_dir INTEGER NOT NULL DEFAULT 1 CHECK(is_dir IN (0, 1)), -- 是否目录
     is_alive INTEGER NOT NULL DEFAULT 1 CHECK(is_alive IN (0, 1)), -- 是否存活（存活即是不是删除状态）
     extra BLOB DEFAULT NULL,              -- 额外的数据
-    created_at TIMESTAMP DEFAULT ((julianday('now') - 2440587.5) * 86400), -- 创建时间
+    created_at TIMESTAMP DEFAULT (unixepoch('subsec')), -- 创建时间
     updated_at TIMESTAMP DEFAULT (CAST(STRFTIME('%s', 'now') AS INTEGER))  -- 更新时间
 );
 
@@ -55,14 +55,14 @@ CREATE TABLE IF NOT EXISTS data (
 CREATE TABLE IF NOT EXISTS life (
     id INTEGER NOT NULL PRIMARY KEY, -- 文件或目录的 id
     data JSON NOT NULL, -- 数据
-    created_at TIMESTAMP DEFAULT ((julianday('now') - 2440587.5) * 86400) -- 创建时间
+    created_at TIMESTAMP DEFAULT (unixepoch('subsec')) -- 创建时间
 );
 
 -- history 表，用来保存历史记录
 CREATE TABLE IF NOT EXISTS history (
     id INTEGER NOT NULL PRIMARY KEY, -- 文件或目录的 id
     data JSON NOT NULL, -- 数据
-    created_at TIMESTAMP DEFAULT ((julianday('now') - 2440587.5) * 86400) -- 创建时间
+    created_at TIMESTAMP DEFAULT (unixepoch('subsec')) -- 创建时间
 );
 
 -- 索引
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS fs_event (
     pid1 INTEGER NOT NULL DEFAULT -1,     -- 变更后上级目录的 id
     name0 TEXT NOT NULL DEFAULT '',       -- 变更前的名字
     name1 TEXT NOT NULL DEFAULT '',       -- 变更后的名字
-    created_at TIMESTAMP DEFAULT ((julianday('now') - 2440587.5) * 86400) -- 创建时间
+    created_at TIMESTAMP DEFAULT (unixepoch('subsec')) -- 创建时间
 );
 
 -- data 表发生插入
