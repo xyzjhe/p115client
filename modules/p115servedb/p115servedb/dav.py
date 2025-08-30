@@ -4,7 +4,7 @@
 __author__ = "ChenyangGao <https://chenyanggao.github.io>"
 __all__ = ["main"]
 __doc__ = """\
-    🛸 115 数据库 WebDAV 服务，请先用 p115updatedb 采集数据 ✈️
+    🛸 115 数据库 WebDAV 服务 ✈️
 """
 
 from argparse import ArgumentParser, Namespace, RawTextHelpFormatter
@@ -54,7 +54,6 @@ def main(argv: None | list[str] | Namespace = None, /):
         predicate = make_predicate(predicate, {"re": __import__("re")}, type=args.predicate_type)
     if args.fast_strm:
         strm_predicate = make_predicate("""(
-        path["type"] in (3, 4) or
         path.media_type.startswith(("video/", "audio/")) and
         path.suffix.lower() != ".ass" or
         path.suffix.lower() in (".divx", ".iso", ".m2ts", ".swf", ".xvid")
@@ -111,6 +110,7 @@ def main(argv: None | list[str] | Namespace = None, /):
     run_config.setdefault("server_header", False)
     run_config.setdefault("forwarded_allow_ips", "*")
     run_config.setdefault("timeout_graceful_shutdown", 1)
+    run_config.setdefault("access_log", False)
 
     app = make_application(
         dbfile=args.dbfile, 
@@ -164,7 +164,6 @@ parser.add_argument("-fs", "--fast-strm", action="store_true", help="""快速实
 
     --strm-predicate-type expr \\
     --strm-predicate '(
-        path["type"] in (3, 4) or
         path.media_type.startswith(("video/", "audio/")) and
         path.suffix.lower() != ".ass" or
         path.suffix.lower() in (".divx", ".iso", ".m2ts", ".swf", ".xvid")

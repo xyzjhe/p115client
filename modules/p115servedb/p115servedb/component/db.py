@@ -9,14 +9,11 @@ __all__ = [
 
 from collections.abc import Mapping, Iterable, Sequence
 from sqlite3 import Connection, Cursor
-from typing import Any, Final
+from typing import Any
 
 from dictattr import AttrDict
 from encode_uri import encode_uri_component_loose
-from p115updatedb.query import (
-    id_to_path, get_id, get_pickcode, get_sha1, get_path, get_attr, 
-    get_ancestors, iter_children, 
-)
+from p115client.tool import P115QueryDB
 
 
 def normattr(m: Mapping | Iterable[tuple[str, Any]], /) -> AttrDict:
@@ -29,9 +26,13 @@ def normattr(m: Mapping | Iterable[tuple[str, Any]], /) -> AttrDict:
         attr["ico"] = "folder"
     else:
         attr["url"] = f"/{name}?file=true&pickcode={attr['pickcode']}"
-        if attr["is_collect"] and attr["size"] < 1024 * 1024 * 115:
+        if attr.get("is_collect", False) and attr["size"] < 1024 * 1024 * 115:
             attr["url"] += "&web=true"
         attr["ico"] = attr["name"].rpartition(".")[-1].lower()
+    if "ctime" not in attr:
+        attr["ctime"] = attr.get("created_at", 0)
+    if "mtime" not in attr:
+        attr["mtime"] = attr.get("updated_at", 0)
     return attr
 
 
@@ -42,7 +43,7 @@ def attr_to_path(
     ensure_file: None | bool = None, 
     parent_id: int = 0, 
 ) -> AttrDict:
-    id = id_to_path(con, path, ensure_file=ensure_file, parent_id=parent_id)
+    id = P115QueryDB(con).id_to_path(path, ensure_file=ensure_file, parent_id=parent_id)
     return get_attr_from_db(con, id)
 
 
@@ -53,7 +54,7 @@ def get_id_from_db(
     sha1: str = "", 
     path: str = "", 
 ) -> int:
-    return get_id(con, pickcode, sha1, path)
+    return P115QueryDB(con).get_id(pickcode, sha1, path)
 
 
 def get_pickcode_from_db(
@@ -63,7 +64,7 @@ def get_pickcode_from_db(
     sha1: str = "", 
     path: str = "", 
 ) -> str:
-    return get_pickcode(con, id, sha1, path)
+    return P115QueryDB(con).get_pickcode(id, sha1, path)
 
 
 def get_sha1_from_db(
@@ -73,7 +74,7 @@ def get_sha1_from_db(
     pickcode: str = "", 
     path: str = "", 
 ) -> str:
-    return get_sha1(con, id, pickcode, path)
+    return P115QueryDB(con).get_sha1(id, pickcode, path)
 
 
 def get_path_from_db(
@@ -81,7 +82,7 @@ def get_path_from_db(
     id: int = 0, 
     /, 
 ) -> str:
-    return get_path(con, id)
+    return P115QueryDB(con).get_path(id)
 
 
 def get_ancestors_from_db(
@@ -89,7 +90,7 @@ def get_ancestors_from_db(
     id: int = 0, 
     /, 
 ) -> list[dict]:
-    ancestors = get_ancestors(con, id)
+    ancestors = P115QueryDB(con).get_ancestors(id)
     for a in ancestors:
         a["id"] = str(a["id"])
         a["parent_id"] = str(a["parent_id"])
@@ -101,7 +102,7 @@ def get_attr_from_db(
     id: int = 0, 
     /, 
 ) -> AttrDict:
-    return normattr(get_attr(con, id))
+    return normattr(P115QueryDB(con).get_attr(id))
 
 
 def get_children_from_db(
@@ -109,7 +110,7 @@ def get_children_from_db(
     id: int = 0, 
     /, 
 ) -> list[AttrDict]:
-    ls = list(map(normattr, iter_children(con, id)))
+    ls = list(map(normattr, P115QueryDB(con).iter_children(id)))
     ls.sort(key=lambda a: (1 - a["is_dir"], a["name"]))
     return ls
 

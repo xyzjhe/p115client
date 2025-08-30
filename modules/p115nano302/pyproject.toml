@@ -28,12 +28,13 @@ include = [
 [tool.poetry.dependencies]
 python = "^3.12"
 blacksheep = "*"
+blacksheep-rich-log = ">=0.0.2"
 cachedict = ">=0.0.6"
 orjson = "*"
 p115rsacipher = ">=0.0.1"
 p115pickcode = ">=0.0.5.4"
+python-dicttools = ">=0.0.4"
 pyyaml = "*"
-rich = "*"
 uvicorn = "*"
 
 [tool.poetry.scripts]

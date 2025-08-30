@@ -350,6 +350,7 @@ def iter_115_to_115_resume(
             from_client, 
             from_cid, 
             normalize_attr=normalize_attr_simple, 
+            with_ancestors=True, 
             async_=async_, 
             **request_kwargs, 
         )
@@ -398,6 +399,7 @@ def iter_115_to_115_resume(
                     to_cid, 
                     id_to_dirnode=id_to_dirnode, 
                     normalize_attr=normalize_attr_simple, 
+                    with_ancestors=True, 
                     async_=async_, 
                     **request_kwargs, 
                 )

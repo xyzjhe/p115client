@@ -16,7 +16,7 @@ from asyncio import (
 from collections import defaultdict
 from collections.abc import (
     AsyncIterator, Callable, Coroutine, Iterable, Iterator, 
-    Mapping, MutableMapping, 
+    Mapping, MutableMapping, Sequence, 
 )
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import contextmanager
@@ -29,7 +29,6 @@ from os.path import abspath, dirname, join as joinpath, normpath, splitext
 from queue import SimpleQueue
 from sqlite3 import connect, Connection, Cursor
 from sys import exc_info
-from threading import Lock
 from time import time
 from typing import cast, overload, Any, Literal
 from types import EllipsisType
@@ -39,12 +38,13 @@ from uuid import uuid4
 from warnings import warn
 
 from asynctools import async_chain
-from concurrenttools import run_as_thread
+from concurrenttools import conmap, run_as_thread
 from encode_uri import encode_uri_component_loose
 from iterutils import (
-    chunked, map as do_map, run_gen_step, run_gen_step_iter, 
-    through, with_iter_next, Yield, YieldFrom, GenStep, 
+    chunked, map as do_map, chain_from_iterable, run_gen_step, 
+    run_gen_step_iter, through, with_iter_next, Yield, YieldFrom, 
 )
+from orjson import loads
 from p115client import (
     check_response, normalize_attr, normalize_attr_simple, P115Client, 
     P115OpenClient, P115URL, 
@@ -1436,6 +1436,8 @@ def make_strm(
     return run_gen_step(gen_step, async_)
 
 
+# TODO: 启动后，尝试往后探测一下最后一页的边界，然后从后往前拉，因为后面的响应更久，放到前面则可以使总的等待时间更短
+# TODO: 一部分从前往后，一部分从后往前，因为直接从后往前，会导致连接池复用性太低，因为后面的请求要占用很久
 @overload
 def iter_download_nodes(
     client: str | PathLike | P115Client, 
@@ -1492,22 +1494,43 @@ def iter_download_nodes(
     """
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
-    get_base_url = cycle(("http://pro.api.115.com", "https://proapi.115.com")).__next__
-    if async_:
-        if max_workers is None or max_workers <= 0:
-            max_workers = 20
-    elif max_workers is not None and max_workers <= 0:
-        max_workers = None
+    if max_workers is None or max_workers <= 0:
+        max_workers = 20 if async_ else None
     if files:
-        method = client.download_files
+        get_nodes = client.download_files
     else:
-        method = client.download_folders
+        ensure_name = False
+        get_nodes = client.download_folders
         if id_to_dirnode is None:
             id_to_dirnode = ID_TO_DIRNODE_CACHE[client.user_id]
     file_skim = client.fs_file_skim
-    need_yield = files and ensure_name
-    def normalize_attrs(attrs: list[dict], /):
-        if attrs:
+    def ensure_names(attrs: Sequence[dict], /):
+        if not (ensure_name and attrs):
+            return attrs
+        def request(attrs: Sequence[dict], /):
+            resp = yield file_skim(
+                (a["id"] for a in attrs), 
+                method="POST", 
+                async_=async_, 
+                **request_kwargs, 
+            )
+            if resp.get("error") == "文件不存在":
+                return attrs
+            check_response(resp)
+            nodes = {
+                int(node["file_id"]): unescape_115_charref(node["file_name"])
+                for node in resp["data"]
+            }
+            for attr in attrs:
+                if name := nodes.get(attr["id"]):
+                    attr["name"] = name
+            return attrs
+        return run_gen_step(request(attrs), async_)
+    def parse(_, content: bytes, /) -> dict:
+        resp = loads(content)
+        check_response(resp)
+        data = resp["data"]
+        if attrs := data["list"]:
             if files:
                 for i, info in enumerate(attrs):
                     attrs[i] = {
@@ -1528,78 +1551,66 @@ def iter_download_nodes(
                 if id_to_dirnode is not ... and id_to_dirnode is not None:
                     for attr in attrs:
                         id_to_dirnode[attr["id"]] = (attr["name"], attr["parent_id"])
-        return attrs
-    if need_yield:
-        prepare = normalize_attrs
-        def normalize_attrs(attrs: list[dict], /):
-            prepare(attrs)
-            if attrs:
-                def load_names(attrs, /):
-                    resp = yield file_skim(
-                        (a["id"] for a in attrs), 
-                        method="POST", 
-                        async_=async_, 
-                        **request_kwargs, 
-                    )
-                    if resp.get("error") != "文件不存在":
-                        check_response(resp)
-                        nodes = {int(a["file_id"]): a for a in resp["data"]}
-                        for attr in attrs:
-                            if node := nodes.get(attr["id"]):
-                                attr["sha1"] = node["sha1"]
-                                attr["name"] = unescape_115_charref(node["file_name"])
-                    return attrs
-                return GenStep(load_names(attrs))
-            return attrs
-    get_nodes = partial(
-        method, 
-        async_=async_, 
-        **{"base_url": get_base_url, **request_kwargs}, 
-    )
-    to_pickcode = client.to_pickcode
+        return data
+    kwargs = {
+        "base_url": cycle(("http://pro.api.115.com", "http://proapi.115.com")).__next__, 
+        **request_kwargs, 
+        "parse": parse, 
+    }
     if max_workers == 1:
-        def gen_step(pickcode: int | str, /):
-            pickcode = to_pickcode(pickcode)
+        def iter_list(pickcode: str, /):
             for i in count(1):
-                payload = {"pickcode": pickcode, "page": i}
-                resp = yield get_nodes(payload)
-                check_response(resp)
-                data = resp["data"]
-                yield YieldFrom(normalize_attrs(data["list"]))
-                if not data["has_next_page"]:
+                resp: dict = yield get_nodes(
+                    {"pickcode": pickcode, "page": i}, 
+                    async_=async_, 
+                    **kwargs, 
+                )
+                yield Yield(resp["list"])
+                if not resp["has_next_page"]:
                     break
     else:
-        def gen_step(pickcode: int | str, /):
-            max_page = 0
-            def request(task_idx, pickcode: str, /):
-                nonlocal max_page
-                while True:
-                    page = get_next_page()
-                    if max_page and page > max_page:
-                        return
-                    task_page[task_idx] = page
-                    try:
-                        resp: dict = yield get_nodes({"pickcode": pickcode, "page": page})
-                        check_response(resp)
-                        data = resp["data"]
-                        attrs = normalize_attrs(data["list"])
-                        if need_yield:
-                            attrs = yield attrs
-                    except BaseException as e:
-                        put(e)
-                        return
-                    put(attrs)
-                    if not data["has_next_page"]:
-                        max_page = page
-                        for i, p in enumerate(task_page):
-                            if p > page:
-                                task_list[i].cancel()
-            get_next_page = count(1).__next__
-            if async_:
-                q: Any = AsyncQueue()
-            else:
-                q = SimpleQueue()
-            get, put = q.get, q.put_nowait
+        next_page = count(1).__next__
+        sentinel = object()
+        max_page = 0
+        if async_:
+            q: AsyncQueue | SimpleQueue = AsyncQueue()
+        else:
+            q = SimpleQueue()
+        get, put = q.get, q.put_nowait
+        task_list: list = []
+        task_page: list[int] = []
+        task_ids: set[int] = set()
+        discard_task_id = task_ids.discard
+        def countdown(task_id, /):
+            discard_task_id(task_id)
+            if not task_ids:
+                put(sentinel)
+        def request(task_id, pickcode: str, /):
+            nonlocal max_page
+            try:
+                page = next_page()
+                while not max_page or page < max_page:
+                    task_page[task_id] = page
+                    resp: dict = yield get_nodes(
+                        {"pickcode": pickcode, "page": page}, 
+                        async_=async_, 
+                        **kwargs, 
+                    )
+                    put(resp["list"])
+                    if not resp["has_next_page"]:
+                        if not max_page or page < max_page:
+                            max_page = page
+                            for i, p in enumerate(task_page):
+                                if p > page:
+                                    task_list[i].cancel()
+                                    countdown(i)
+                        break
+                    page = next_page()
+            except BaseException as e:
+                put(e)
+            finally:
+                countdown(task_id)
+        def iter_list(pickcode: str, /):
             if async_:
                 n = cast(int, max_workers)
                 task_group = TaskGroup()
@@ -1612,41 +1623,31 @@ def iter_download_nodes(
                 n = executor._max_workers
                 submit = executor.submit
                 shutdown = lambda: executor.shutdown(False, cancel_futures=True)
-            pickcode = to_pickcode(pickcode)
             try:
-                sentinel = object()
-                countdown: Callable
-                if async_:
-                    def countdown(_, /):
-                        nonlocal n
-                        n -= 1
-                        if not n:
-                            put(sentinel)
-                else:
-                    def countdown(_, /, lock=Lock()):
-                        nonlocal n
-                        with lock:
-                            n -= 1
-                            if not n:
-                                put(sentinel)
-                task_list: list = [None] * n
-                task_page: list[int] = [0] * n
                 for i in range(n):
-                    task = task_list[i] = submit(run_gen_step, request(i, pickcode), async_)
-                    task.add_done_callback(countdown)
+                    task_page.append(0)
+                    task_list.append(submit(run_gen_step, request(i, pickcode), async_))
                 while True:
-                    ls = yield get()
-                    if ls is sentinel:
+                    if async_:
+                        resp = yield get()
+                    else:
+                        resp = get()
+                    if resp is sentinel:
                         break
-                    elif isinstance(ls, (CancelledError, AsyncCancelledError)):
+                    elif isinstance(resp, (CancelledError, AsyncCancelledError)):
                         continue
-                    elif isinstance(ls, BaseException):
-                        raise ls
-                    yield YieldFrom(ls)
+                    elif isinstance(resp, BaseException):
+                        raise resp
+                    yield Yield(resp)
             finally:
                 yield shutdown()
-    if pickcode:
-        return run_gen_step_iter(gen_step(pickcode), async_)
+    def gen_step(pickcode, /):
+        it = run_gen_step_iter(iter_list(pickcode), async_)
+        if ensure_name:
+            it = conmap(ensure_names, it, max_workers=max_workers, async_=async_)
+        return chain_from_iterable(it, async_=async_) # type: ignore
+    if pickcode := client.to_pickcode(pickcode):
+        return gen_step(pickcode)
     else:
         def chain():
             pickcodes: list[str] = []
@@ -1670,7 +1671,7 @@ def iter_download_nodes(
                     elif files:
                         yield Yield(attr)
             for pickcode in pickcodes:
-                yield YieldFrom(run_gen_step_iter(gen_step(pickcode), async_))             
+                yield YieldFrom(gen_step(pickcode))
         return run_gen_step_iter(chain, async_)
 
 

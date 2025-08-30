@@ -4,7 +4,7 @@
 __author__ = "ChenyangGao <https://chenyanggao.github.io>"
 __all__ = ["main"]
 __doc__ = """\
-    🌍 115 数据库 FUSE 服务，请先用 p115updatedb 采集数据 🪩
+    🌍 115 数据库 FUSE 服务 🪩
 
 ⏰ 由于网盘对多线程访问的限制，请停用挂载目录的显示图标预览
 
@@ -90,7 +90,6 @@ def main(argv: None | list[str] | Namespace = None, /):
         predicate = make_predicate(predicate, {"re": re}, type=args.predicate_type)
     if args.fast_strm:
         strm_predicate = make_predicate("""(
-    path["type"] in (3, 4) or
     path.media_type.startswith(("video/", "audio/")) and
     path.suffix.lower() != ".ass" or
     path.suffix.lower() in (".divx", ".iso", ".m2ts", ".swf", ".xvid")
@@ -168,7 +167,6 @@ parser.add_argument("-fs", "--fast-strm", action="store_true", help="""快速实
 
     --strm-predicate-type expr \\
     --strm-predicate '(
-        path["type"] in (3, 4) or
         path.media_type.startswith(("video/", "audio/")) and
         path.suffix.lower() != ".ass" or
         path.suffix.lower() in (".divx", ".iso", ".m2ts", ".swf", ".xvid")

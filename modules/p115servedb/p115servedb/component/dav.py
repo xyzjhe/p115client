@@ -8,8 +8,6 @@ __all__ = ["make_application"]
 
 from asyncio import to_thread
 from collections.abc import Callable, Mapping, MutableMapping
-from datetime import datetime
-from inspect import getsource
 from io import BytesIO
 from os import environ, PathLike
 from pathlib import Path
@@ -17,6 +15,7 @@ from posixpath import splitext, split as splitpath
 from sqlite3 import connect, register_adapter, register_converter, Connection
 from string import hexdigits
 from threading import Lock
+from typing import cast
 from urllib.parse import quote
 from weakref import WeakValueDictionary
 
@@ -24,19 +23,22 @@ from a2wsgi import WSGIMiddleware
 from blacksheep import redirect, text, Application, Router
 from blacksheep.contents import Content, StreamedContent
 from blacksheep.messages import Request, Response
-from blacksheep.server.compression import use_gzip_compression
 from blacksheep.server.remotes.forwarding import ForwardedHeadersMiddleware
 from blacksheep.server.rendering.jinja2 import JinjaRenderer
 from blacksheep.server.responses import view_async
 from blacksheep.settings.html import html_settings
 from blacksheep.settings.json import json_settings
+from blacksheep_rich_log import middleware_access_log
 from cachedict import LRUDict
 from encode_uri import encode_uri, encode_uri_component_loose
+from http_client_request import request as http_client_request
+from httpcore_request import request_async
 from httpagentparser import detect as detect_ua # type: ignore
-from httpx import Client, AsyncClient
+from http_response import get_status_code
 from orjson import dumps as json_dumps, loads as json_loads
 from p115client import check_response, P115Client, P115URL
 from p115client.exception import AuthenticationError, BusyOSError
+from p115pickcode import is_valid_pickcode
 from path_predicate import MappingPath
 from posixpatht import escape
 from property import locked_cacheproperty
@@ -70,31 +72,8 @@ jinja2_filters["format_timestamp"] = format_timestamp
 jinja2_filters["escape_name"] = lambda name, default="/": escape(name) or default
 
 
-def get_status_code(e: BaseException, /) -> None | int:
-    status = (
-        getattr(e, "status", None) or 
-        getattr(e, "code", None) or 
-        getattr(e, "status_code", None)
-    )
-    if status is None and hasattr(e, "response"):
-        response = e.response
-        status = (
-            getattr(response, "status", None) or 
-            getattr(response, "code", None) or 
-            getattr(response, "status_code", None)
-        )
-    return status
-
-
 def get_origin(request: Request) -> str:
     return f"{request.scheme}://{request.host}"
-
-
-def check_pickcode(pickcode: str, /, raise_for_false: bool = True):
-    result = 17 <= len(pickcode) <= 18 and pickcode.isalnum()
-    if raise_for_false and not result:
-        raise ValueError(f"bad pickcode: {pickcode!r}")
-    return result
 
 
 def check_sha1(sha1: str, /, raise_for_false: bool = True):
@@ -122,15 +101,16 @@ def make_application(
             cookies_path = ""
 
     app = Application(router=Router(), show_error_details=debug)
-    use_gzip_compression(app)
+    if debug:
+        logger = getattr(app, "logger")
+        logger.level = 10 # logging.DEBUG
+
     app.serve_files(
         Path(__file__).parent.with_name("static"), 
         root_path="/%3Cstatic", 
         fallback_document="index.html", 
     )
     client = P115Client(cookies_path, app="alipaymini", check_for_relogin=True) if cookies_path else None
-    session: Client
-    async_session: AsyncClient
     con: Connection
     con_file: Connection
 
@@ -145,19 +125,7 @@ def make_application(
     def configure_forwarded_headers(app: Application):
         app.middlewares.insert(0, ForwardedHeadersMiddleware(accept_only_proxied_requests=False))
 
-    @app.lifespan
-    async def register_client(app: Application):
-        nonlocal session
-        with Client() as session:
-            app.services.register(Client, instance=session)
-            yield
-
-    @app.lifespan
-    async def register_async_client(app: Application):
-        nonlocal async_session
-        async with AsyncClient() as async_session:
-            app.services.register(AsyncClient, instance=async_session)
-            yield
+    middleware_access_log(app)
 
     @app.lifespan
     async def register_connection(app: Application):
@@ -249,7 +217,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sha1_size ON data(sha1, size);""")
         path: str = "", 
     ) -> int:
         if pickcode:
-            check_pickcode(pickcode)
+            is_valid_pickcode(pickcode)
             return await to_thread(get_id_from_db, con, pickcode=pickcode.lower())
         elif id >= 0:
             return id
@@ -268,7 +236,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sha1_size ON data(sha1, size);""")
         path: str = "", 
     ) -> str:
         if pickcode:
-            check_pickcode(pickcode)
+            is_valid_pickcode(pickcode)
             return pickcode.lower()
         elif id >= 0:
             return await to_thread(get_pickcode_from_db, con, id=id)
@@ -287,7 +255,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sha1_size ON data(sha1, size);""")
         path: str = "", 
     ) -> str:
         if pickcode:
-            check_pickcode(pickcode)
+            is_valid_pickcode(pickcode)
             return await to_thread(get_sha1_from_db, con, pickcode=pickcode.lower())
         elif id >= 0:
             return await to_thread(get_sha1_from_db, con, id=id)
@@ -475,8 +443,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sha1_size ON data(sha1, size);""")
                             FILE_DATA_CACHE[key] = data
                             return get_ranged_data(data)
                     if client is None:
-                        resp = await async_session.request("GET", url, headers=url.get("headers"))
-                        data = await resp.aread()
+                        data = await request_async(
+                            url, 
+                            headers=url.get("headers"), 
+                            parse=False, 
+                        )
                     else:
                         data = await client.read_bytes(url, async_=True)
                     FILE_DATA_CACHE[key] = data
@@ -509,7 +480,6 @@ ON CONFLICT DO UPDATE SET data = excluded.data;""", locals())
     @app.router.route("/%3Cdownload/*", methods=["GET", "HEAD", "POST"])
     async def do_download(
         request: Request, 
-        session: AsyncClient, 
         url: str, 
         timeout: None | float = None, 
     ) -> Response:
@@ -517,24 +487,20 @@ ON CONFLICT DO UPDATE SET data = excluded.data;""", locals())
 
         :param url: 下载链接
         """
-        resp = await session.send(
-            request=session.build_request(
-                method=request.method, 
-                url=url, 
-                data=request.stream(), # type: ignore
-                headers=[
-                    (str(k, "latin-1").title(), str(v, "latin-1"))
-                    for k, v in request.headers
-                    if k.lower() != b"host"
-                ], 
-                timeout=timeout, 
-            ), 
-            stream=True, 
+        resp = await request_async(
+            method=request.method, 
+            url=url, 
+            data=request.stream(), 
+            headers=[
+                (str(k, "latin-1"), str(v, "latin-1"))
+                for k, v in request.headers
+                if k.lower() != b"host"
+            ], 
+            extensions={"timeout": timeout}, 
         )
         async def stream():
-            stream = resp.aiter_raw()
             try:
-                async for chunk in stream:
+                async for chunk in resp.aiter_stream():
                     if await request.is_disconnected():
                         break
                     yield chunk
@@ -567,7 +533,6 @@ ON CONFLICT DO UPDATE SET data = excluded.data;""", locals())
     @app.router.route("/%3Csub2ass/*", methods=["GET", "HEAD", "POST"])
     async def sub2ass(
         request: Request, 
-        session: AsyncClient, 
         url: str, 
         format: str = "srt", 
     ) -> str:
@@ -578,19 +543,17 @@ ON CONFLICT DO UPDATE SET data = excluded.data;""", locals())
 
         :return: 转换后的字幕文本
         """
-        resp = await session.send(
-            request=session.build_request(
-                method=request.method, 
-                url=url, 
-                data=request.stream(), # type: ignore
-                headers=[
-                    (str(k, "latin-1").title(), str(v, "latin-1"))
-                    for k, v in request.headers
-                    if k.lower() != b"host"
-                ], 
-            ), 
+        data = await request_async(
+            method=request.method, 
+            url=url, 
+            data=request.stream(), 
+            headers=[
+                (str(k, "latin-1"), str(v, "latin-1"))
+                for k, v in request.headers
+                if k.lower() != b"host"
+            ], 
+            parse=False, 
         )
-        data = await resp.aread()
         return SSAFile.from_string(data.decode("utf-8"), format_=format).to_string("ass")
 
     class DavPathBase:
@@ -685,7 +648,7 @@ ON CONFLICT DO UPDATE SET data = excluded.data;""", locals())
                 if data is not None:
                     FILE_DATA_CACHE[key] = data
                     return data
-                data = FILE_DATA_CACHE[key] = session.request("GET", self.url).read()
+                data = FILE_DATA_CACHE[key] = http_client_request(self.url).read()
                 execute(con_file, """\
 INSERT INTO data(sha1, size, data) VALUES(:sha1, :size, :data) 
 ON CONFLICT DO UPDATE SET data = excluded.data;""", locals())

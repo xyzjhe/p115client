@@ -6,28 +6,23 @@ import { Fragment } from "react";
 import { message } from "antd";
 import Spin from "/@/assets/icon/spin.svg?react";
 
-const getData = async (path: string) => {
-  const fileList = await getList({ path });
-  if (fileList.length > 0) {
-    const ancestors = fileList[0].ancestors.slice(0, -1) || [];
-    return { fileList, ancestors };
-  }
-  const ancestors = await getAncestors({ path });
-  return { fileList, ancestors };
+const getData = async (id: number | string) => {
+  const { ancestors, children } = await getList({ id });
+  return { fileList: children, ancestors };
 };
 
 const Index = () => {
   let [searchParams, setSearchParams] = useSearchParams();
 
-  const path = searchParams.get("path") || "/";
+  const id = searchParams.get("id") || 0;
 
   const {
     data,
     error: fileListError,
     isLoading: isFileListLoading,
   } = useSWR<{ fileList: FileInfo[]; ancestors: Ancestor[] }>(
-    ["/list", path],
-    ([_url, path]: any) => getData(path)
+    ["/list", id],
+    ([_url, id]: any) => getData(id)
   );
 
   const { fileList, ancestors } = data || {
@@ -35,8 +30,8 @@ const Index = () => {
     ancestors: [],
   };
 
-  const navTo = (file: Pick<FileInfo, "path" | "ancestors">) => {
-    setSearchParams({ path: file.path });
+  const navTo = (file: Pick<FileInfo, "id">) => {
+    setSearchParams({ id: file.id });
   };
 
   const renderFileList = () => {
@@ -70,7 +65,7 @@ const Index = () => {
                 key={file.pickcode}
                 file={file}
                 onClick={() => {
-                  if (file.is_directory) {
+                  if (file.is_dir) {
                     navTo(file);
                   }
                 }}
@@ -94,27 +89,24 @@ const Index = () => {
         <div
           className="pr-[4px] hover:text-[#ffffffee] cursor-pointer  transition-all duration-300 ease-in-out whitespace-nowrap"
           onClick={() => {
-            navTo({ path: "/", ancestors: [] });
+            navTo({ id: 0 });
           }}
         >
           首页
         </div>
         {ancestors?.map((item, index) => {
           return (
-            <Fragment key={item.id}>
+            <Fragment key={ item.id }>
               <span
                 className="hover:text-[#ffffffee] cursor-pointer  transition-all duration-300 ease-in-out"
+                style={{ fontWeight: "bold" }}
                 onClick={() => {
-                  const newAncestors = ancestors.slice(0, index + 1);
-                  navTo({
-                    path: newAncestors.map((item) => item.name).join("/"),
-                    ancestors: newAncestors,
-                  });
+                  navTo({ id: item.id });
                 }}
               >
                 {item.name}
               </span>
-              {index !== ancestors.length - 1 && " / "}
+              { index != ancestors.length - 1 && "/"}
             </Fragment>
           );
         })}
@@ -124,9 +116,9 @@ const Index = () => {
             className="cursor-pointer w-[28px] h-[28px] opacity-30 group-hover:opacity-80 transition-all duration-300 ease-in-out group-hover:filter"
             alt="复制路径"
             onClick={() => {
-              navigator.clipboard.writeText(path).then(
+              navigator.clipboard.writeText(id).then(
                 () => {
-                  message.success("已复制路径：" + path);
+                  message.success("已复制路径：" + id);
                 },
                 () => {
                   message.error("复制路径失败，请手动复制");
@@ -138,15 +130,12 @@ const Index = () => {
       </div>
       <div className="z-10 sticky top-[--safe-area-inset-top] bg-[#131313]">
         {/* 返回上级目录 */}
-        {path !== "/" && (
+        {id != 0 && (
           <div
             className="mb-[0px] text-[14px] text-[#FFFFFFCC] hover:text-[15px] hover:text-[#ffffffee] hover:px-[14px] py-[12px] rounded-[8px] cursor-pointer hover:bg-[#ffffff0d] transition-all duration-300 ease-in-out"
             onClick={async () => {
-              const parentPath = ancestors
-                .slice(0, -1)
-                .map((item) => item.name)
-                .join("/");
-              setSearchParams({ path: parentPath });
+              const parent = ancestors[ancestors.length-1];
+              setSearchParams({ id: parent.parent_id });
             }}
           >
             <div className="flex items-center">

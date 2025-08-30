@@ -4,85 +4,28 @@
 __author__ = "ChenyangGao <https://chenyanggao.github.io>"
 __all__ = ["make_application"]
 
-import logging
-
-from collections.abc import Buffer, Mapping
 from errno import ENOENT, ENOTDIR
 from hashlib import sha1 as calc_sha1
-from http import HTTPStatus
 from re import compile as re_compile
 from string import digits, hexdigits
 from time import time as get_timestamp
 from typing import Final
-from urllib.parse import parse_qsl, quote, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
-from blacksheep import json, redirect, text, Application, Request, Response, Router
+from blacksheep import json, redirect, Application, Request, Response, Router
 from blacksheep.contents import Content
 from blacksheep.server.remotes.forwarding import ForwardedHeadersMiddleware
+from blacksheep_rich_log import middleware_access_log
 from cachedict import LRUDict, TLRUDict, TTLDict
-from orjson import dumps, OPT_INDENT_2, OPT_SORT_KEYS
+from dicttools import get_first
+from orjson import dumps
 from p115client import check_response, P115OpenClient, P115ID, P115URL
 from p115pickcode import is_valid_pickcode
 from posixpatht import splits
-from rich.box import ROUNDED
-from rich.console import Console
-from rich.highlighter import JSONHighlighter
-from rich.panel import Panel
-from rich.text import Text
-from uvicorn.config import LOGGING_CONFIG
 
 
 CRE_name_search: Final = re_compile("[^&=]+(?=&|$)").match
 CRE_def_sub: Final = re_compile(r"(?<=definition=)\d+").sub
-
-LOGGING_CONFIG["formatters"]["default"]["fmt"] = "[\x1b[1m%(asctime)s\x1b[0m] %(levelprefix)s %(message)s"
-LOGGING_CONFIG["formatters"]["access"]["fmt"] = '[\x1b[1m%(asctime)s\x1b[0m] %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
-
-
-class ColoredLevelNameFormatter(logging.Formatter):
-
-    def format(self, record):
-        match record.levelno:
-            case logging.DEBUG:
-                # blue
-                record.levelname = f"\x1b[34m{record.levelname}\x1b[0m:".ljust(18)
-            case logging.INFO:
-                # green
-                record.levelname = f"\x1b[32m{record.levelname}\x1b[0m:".ljust(18)
-            case logging.WARNING:
-                # yellow
-                record.levelname = f"\x1b[33m{record.levelname}\x1b[0m:".ljust(18)
-            case logging.ERROR:
-                # red
-                record.levelname = f"\x1b[31m{record.levelname}\x1b[0m:".ljust(18)
-            case logging.CRITICAL:
-                # magenta
-                record.levelname = f"\x1b[35m{record.levelname}\x1b[0m:".ljust(18)
-            case _:
-                # dark grey
-                record.levelname = f"\x1b[2m{record.levelname}\x1b[0m: ".ljust(18)
-        return super().format(record)
-
-
-def default(obj, /):
-    if isinstance(obj, Buffer):
-        return str(obj, "utf-8")
-    raise TypeError
-
-
-def highlight_json(val, /, default=default, highlighter=JSONHighlighter()) -> Text:
-    if isinstance(val, Buffer):
-        val = str(val, "utf-8")
-    if not isinstance(val, str):
-        val = dumps(val, default=default, option=OPT_INDENT_2 | OPT_SORT_KEYS).decode("utf-8")
-    return highlighter(val)
-
-
-def get_first(m: Mapping, *keys, default=None):
-    for k in keys:
-        if k in m:
-            return m[k]
-    return default
 
 
 def make_application(
@@ -117,87 +60,15 @@ def make_application(
     DOWNLOAD_URL_CACHE2: TLRUDict[tuple[int, str], tuple[float, P115URL]] = TLRUDict(maxsize=1024)
 
     app = Application(router=Router(), show_error_details=debug)
-    logger = getattr(app, "logger")
-    handler = logging.StreamHandler()
-    handler.setFormatter(ColoredLevelNameFormatter("[\x1b[1m%(asctime)s\x1b[0m] %(levelname)s %(message)s"))
-    logger.addHandler(handler)
-
-    async def redirect_exception_response(
-        self, 
-        request: Request, 
-        exc: Exception, 
-    ):
-        if isinstance(exc, ValueError):
-            return text(str(exc), 400)
-        elif isinstance(exc, FileNotFoundError):
-            return text(str(exc), 404)
-        elif isinstance(exc, OSError):
-            return text(str(exc), 503)
-        else:
-            return text(str(exc), 500)
-
     if debug:
-        logger.level = logging.DEBUG
+        logger = getattr(app, "logger")
+        logger.level = 10 # logging.DEBUG
 
     @app.on_middlewares_configuration
     def configure_forwarded_headers(app: Application):
         app.middlewares.insert(0, ForwardedHeadersMiddleware(accept_only_proxied_requests=False))
 
-    @app.middlewares.append
-    async def access_log(request: Request, handler) -> Response:
-        start_t = get_timestamp()
-        def get_message(response: Response, /) -> str:
-            remote_attr = request.scope["client"]
-            status = response.status
-            if status < 300:
-                status_color = 32
-            elif status < 400:
-                status_color = 33
-            else:
-                status_color = 31
-            message = f'\x1b[5;35m{remote_attr[0]}:{remote_attr[1]}\x1b[0m - "\x1b[1;36m{request.method}\x1b[0m \x1b[1;4;34m{request.url}\x1b[0m \x1b[1mHTTP/{request.scope["http_version"]}\x1b[0m" - \x1b[{status_color}m{status} {HTTPStatus(status).phrase}\x1b[0m - \x1b[32m{(get_timestamp() - start_t) * 1000:.3f}\x1b[0m \x1b[3mms\x1b[0m'
-            if debug:
-                console = Console()
-                with console.capture() as capture:
-                    urlp = urlsplit(str(request.url))
-                    url = urlunsplit(urlp._replace(path=unquote(urlp.path), scheme=request.scheme, netloc=request.host))
-                    console.print(
-                        Panel.fit(
-                            f"[b cyan]{request.method}[/] [u blue]{url}[/] [b]HTTP/[red]{request.scope["http_version"]}",
-                            box=ROUNDED,
-                            title="[b red]URL", 
-                            border_style="cyan", 
-                        ), 
-                    )
-                    headers = {str(k, 'latin-1'): str(v, 'latin-1') for k, v in request.headers}
-                    console.print(
-                        Panel.fit(
-                            highlight_json(headers), 
-                            box=ROUNDED, 
-                            title="[b red]HEADERS", 
-                            border_style="cyan", 
-                        )
-                    )
-                    scope = {k: v for k, v in request.scope.items() if k != "headers"}
-                    console.print(
-                        Panel.fit(
-                            highlight_json(scope), 
-                            box=ROUNDED, 
-                            title="[b red]SCOPE", 
-                            border_style="cyan", 
-                        )
-                    )
-                message += "\n" + capture.get()
-            return message
-        try:
-            response = await handler(request)
-            logger.info(get_message(response))
-        except Exception as e:
-            response = await redirect_exception_response(app, request, e)
-            logger.error(get_message(response))
-            if debug:
-                raise
-        return response
+    middleware_access_log(app)
 
     async def sha1_to_id(
         sha1: str, 
@@ -237,7 +108,7 @@ def make_application(
         if suffix.isalnum():
             payload["suffix"] = suffix
         resp = await client.fs_search_open(payload, async_=True)
-        if get_first(resp, "errno", "errNo") == 20021:
+        if get_first(resp, "errno", "errNo", default=0) == 20021:
             payload.pop("suffix")
             resp = await client.fs_search_open(payload, async_=True)
         check_response(resp)
@@ -468,4 +339,3 @@ if __name__ == "__main__":
     )
 
 # TODO: 需要更新，以追平 p115tiny302，但有些功能可以没有，这个模块必须足够简单
-

@@ -25,20 +25,16 @@ from weakref import WeakValueDictionary
 
 from cachedict import LRUDict
 from fuse import FUSE, Operations # type: ignore
-from httpfile import Urllib3FileReader
+from http_client_request import request
+from httpfile import HTTPFileReader
 from orjson import dumps as json_dumps
 from p115client import P115Client
-from p115updatedb.query import FIELDS
 from path_predicate import MappingPath
 from posixpatht import escape
 from sqlitetools import execute, find
-from urllib3 import PoolManager
 
 from .db import get_attr_from_db, get_id_from_db, get_children_from_db
 from .log import logger
-
-
-urlopen = partial(PoolManager(num_pools=128).request, "GET", preload_content=False, timeout=5)
 
 
 # Learning: 
@@ -175,7 +171,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sha1_size ON data(sha1, size);""")
         - Linux 系统使用 `os.listxattr(path)` 获取
         - 其它系统使用 `xattr.listxattr(path)` 获取（https://pypi.org/project/xattr/）
         """
-        return ("attr", "url", *FIELDS)
+        return ("attr", "url")
 
     def open(self, /, path: str, flags: int = 0) -> int:
         self._log(logging.INFO, "open(path=\x1b[4;34m%r\x1b[0m, flags=%r)", path, flags)
@@ -206,7 +202,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sha1_size ON data(sha1, size);""")
                             use_web_api=use_web_api, 
                         ))
                     else:
-                        data = urlopen(f"{self.strm_origin}?pickcode={pickcode}").read()
+                        data = request(f"{self.strm_origin}?pickcode={pickcode}").read()
                     execute(self.con_file, """\
 INSERT INTO data(sha1, size, data) VALUES(:sha1, :size, :data) 
 ON CONFLICT DO UPDATE SET data = excluded.data;""", locals())
@@ -215,10 +211,10 @@ ON CONFLICT DO UPDATE SET data = excluded.data;""", locals())
         if client:
             file = client.open(
                 client.download_url(pickcode, app="android", use_web_api=use_web_api), 
-                http_file_reader_cls=Urllib3FileReader, 
+                http_file_reader_cls=HTTPFileReader, 
             )
         else:
-            file = Urllib3FileReader(f"{self.strm_origin}?pickcode={pickcode}", urlopen=urlopen)
+            file = HTTPFileReader(f"{self.strm_origin}?pickcode={pickcode}")
         if start == 0:
             preread = file.read(1024 * 64)
         else:
@@ -297,7 +293,6 @@ ON CONFLICT DO UPDATE SET data = excluded.data;""", locals())
                         self.normpath_map[normpath] = realpath
             return [".", "..", *children]
         except BaseException as e:
-            raise
             self._log(
                 logging.ERROR, 
                 "can't readdir: \x1b[4;34m%s\x1b[0m\n  |_ \x1b[1;4;31m%s\x1b[0m: %s", 

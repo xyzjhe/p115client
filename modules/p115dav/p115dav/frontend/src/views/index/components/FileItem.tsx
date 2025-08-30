@@ -92,7 +92,7 @@ const FileItem = ({
   const fileIcon = getFileIcon(fileType);
 
   const items: MenuProps["items"] = [
-    file.is_directory
+    file.is_dir
       ? null
       : {
           key: "download",
@@ -139,7 +139,7 @@ const FileItem = ({
     >
       <td className="rounded-l-[8px]">
         <div className="flex items-center mb-[2px] px-0 sm:hover:px-[14px] py-[16px] transition-all duration-300 ease-in-out">
-          {file.is_directory ? (
+          {file.is_dir ? (
             <img
               src="/img/folder.svg"
               className="mr-2 w-[32px] h-[32px]"

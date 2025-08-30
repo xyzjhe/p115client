@@ -6,17 +6,14 @@ from __future__ import annotations
 __author__ = "ChenyangGao <https://chenyanggao.github.io>"
 __all__ = ["make_application"]
 
-import logging
-
 from asyncio import (
     create_task, get_running_loop, run_coroutine_threadsafe, sleep as async_sleep, 
     AbstractEventLoop, Lock, 
 )
 from collections import deque
-from collections.abc import AsyncIterator, Buffer, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import closing, suppress
 from errno import ENOENT, EBUSY
-from http import HTTPStatus
 from io import BytesIO
 from itertools import cycle
 from math import isinf, isnan
@@ -42,21 +39,22 @@ from blacksheep.server.compression import use_gzip_compression
 from blacksheep.server.rendering.jinja2 import JinjaRenderer
 from blacksheep.settings.html import html_settings
 from blacksheep.settings.json import json_settings
-from blacksheep.server.openapi.common import ParameterInfo
 from blacksheep.server.openapi.ui import ReDocUIProvider
 from blacksheep.server.openapi.v3 import OpenAPIHandler
 from blacksheep.server.remotes.forwarding import ForwardedHeadersMiddleware
 from blacksheep.server.responses import view_async
+from blacksheep_rich_log import middleware_access_log
 from cachedict import LRUDict, TTLDict, TLRUDict
 from encode_uri import encode_uri, encode_uri_component_loose
 from dictattr import AttrDict
+from dicttools import contains_any, get_first
 # NOTE: 其它可用模块
 # - https://pypi.org/project/user-agents/
 # - https://github.com/faisalman/ua-parser-js
 from http_response import get_status_code
 from httpagentparser import detect as detect_ua # type: ignore
 from openapidocs.v3 import Info # type: ignore
-from orjson import dumps, loads, OPT_INDENT_2, OPT_SORT_KEYS
+from orjson import dumps, loads
 from p115client import check_response, CLASS_TO_TYPE, SUFFIX_TO_TYPE, P115Client, P115URL
 from p115client.exception import AuthenticationError, BusyOSError
 from p115client.type import P115ID
@@ -73,11 +71,6 @@ from property import locked_cacheproperty
 # - https://pypi.org/project/ass/
 # - https://pypi.org/project/srt/
 from pysubs2 import SSAFile # type: ignore
-from rich.box import ROUNDED
-from rich.console import Console
-from rich.highlighter import JSONHighlighter
-from rich.panel import Panel
-from rich.text import Text
 from sqlitedict import SqliteTableDict
 from sqlitetools import upsert_items
 from texttools import format_size, format_timestamp
@@ -90,8 +83,6 @@ from . import db
 
 
 CRE_URL_T_search = re_compile(r"(?<=(?:\?|&)t=)\d+").search
-LOGGING_CONFIG["formatters"]["default"]["fmt"] = "[\x1b[1m%(asctime)s\x1b[0m] %(levelprefix)s %(message)s"
-LOGGING_CONFIG["formatters"]["access"]["fmt"] = '[\x1b[1m%(asctime)s\x1b[0m] %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
 
 environ["APP_JINJA_PACKAGE_NAME"] = "p115dav"
 html_settings.use(JinjaRenderer(enable_async=True))
@@ -110,65 +101,11 @@ class TooManyRequests(OSError):
     pass
 
 
-class ColoredLevelNameFormatter(logging.Formatter):
-
-    def format(self, record):
-        match record.levelno:
-            case logging.DEBUG:
-                # blue
-                record.levelname = f"\x1b[34m{record.levelname}\x1b[0m:".ljust(18)
-            case logging.INFO:
-                # green
-                record.levelname = f"\x1b[32m{record.levelname}\x1b[0m:".ljust(18)
-            case logging.WARNING:
-                # yellow
-                record.levelname = f"\x1b[33m{record.levelname}\x1b[0m:".ljust(18)
-            case logging.ERROR:
-                # red
-                record.levelname = f"\x1b[31m{record.levelname}\x1b[0m:".ljust(18)
-            case logging.CRITICAL:
-                # magenta
-                record.levelname = f"\x1b[35m{record.levelname}\x1b[0m:".ljust(18)
-            case _:
-                # dark grey
-                record.levelname = f"\x1b[2m{record.levelname}\x1b[0m: ".ljust(18)
-        return super().format(record)
-
-
 def get_origin(request: Request, /) -> str:
     return f"{request.scheme}://{request.host}"
 
 
-def get_first(m: Mapping, /, *keys, default=None):
-    for k in keys:
-        if k in m:
-            return m[k]
-    return default
-
-
-def contains_any(m: Mapping, /, *keys):
-    return any(k in m for k in keys)
-
-
-def default(obj, /):
-    if isinstance(obj, Buffer):
-        return str(obj, "utf-8")
-    raise TypeError
-
-
-def highlight_json(
-    val, 
-    /, 
-    default=default, 
-    highlighter=JSONHighlighter(), 
-) -> Text:
-    if isinstance(val, Buffer):
-        val = str(val, "utf-8")
-    if not isinstance(val, str):
-        val = dumps(val, default=default, option=OPT_INDENT_2 | OPT_SORT_KEYS).decode("utf-8")
-    return highlighter(val)
-
-
+# TODO: 可以指定前端文件地址，如果不存在，则仅展示 webdav，所以 only_webdav 参数可以去除
 def make_application(
     dbfile: str | Path = "", 
     cookies_path: str | Path = "", 
@@ -182,7 +119,7 @@ def make_application(
     debug: bool = False, 
     wsgidav_config: dict = {}, 
     only_webdav: bool = False, 
-    default_web_page: bool = True, 
+    default_web_page: bool = False, 
     load_libass: bool = False, 
     check_for_relogin: bool = False, 
 ) -> Application:
@@ -217,10 +154,16 @@ def make_application(
     use_gzip_compression(app)
     if default_web_page:
         app.serve_files(
-            Path(__file__).with_name("static"), 
+            Path(__file__).with_name("static0"), 
             root_path="/%3Cpic", 
             fallback_document="index.html", 
         )
+    else:
+        # TODO: 实现一个美化版界面
+        static_dir = Path(__file__).parent / "static"
+        if static_dir.exists():
+            app.serve_files(static_dir, fallback_document="index.html") 
+
     docs = OpenAPIHandler(info=Info(
         title="p115dav backend", 
         version=".".join(map(str, __version__)), 
@@ -229,9 +172,14 @@ def make_application(
     docs.bind_app(app)
 
     logger = getattr(app, "logger")
-    handler = logging.StreamHandler()
-    handler.setFormatter(ColoredLevelNameFormatter("[\x1b[1m%(asctime)s\x1b[0m] %(levelname)s %(message)s"))
-    logger.addHandler(handler)
+    if debug:
+        logger.level = 10 # logging.DEBUG
+        app.use_cors(
+            allow_methods="*",
+            allow_origins="*",
+            allow_headers="* Authorization",
+            max_age=300,
+        )
 
     # NOTE: 缓存图片的 CDN 直链，缓存 59 分钟
     IMAGE_URL_CACHE: TTLDict[str | tuple[str, int], str] = TTLDict(maxsize=cache_size, ttl=60*59)
@@ -334,6 +282,8 @@ def make_application(
     @app.on_middlewares_configuration
     def configure_forwarded_headers(app: Application):
         app.middlewares.insert(0, ForwardedHeadersMiddleware(accept_only_proxied_requests=False))
+
+    middleware_access_log(app)
 
     @app.on_start
     async def get_loop(app: Application):
@@ -462,65 +412,6 @@ def make_application(
             return make_response_for_exception(exc, 500) # Internal Server Error
         else:
             return make_response_for_exception(exc, 503) # Service Unavailable
-
-    if debug:
-        logger.level = logging.DEBUG
-
-    @app.middlewares.append
-    async def access_log(request: Request, handler) -> Response:
-        start_t = time()
-        def get_message(response: Response, /) -> str:
-            remote_attr = request.scope["client"]
-            status = response.status
-            if status < 300:
-                status_color = 32
-            elif status < 400:
-                status_color = 33
-            else:
-                status_color = 31
-            message = f'\x1b[5;35m{remote_attr[0]}:{remote_attr[1]}\x1b[0m - "\x1b[1;36m{request.method}\x1b[0m \x1b[1;4;34m{request.url}\x1b[0m \x1b[1mHTTP/{request.scope["http_version"]}\x1b[0m" - \x1b[{status_color}m{status} {HTTPStatus(status).phrase}\x1b[0m - \x1b[32m{(time() - start_t) * 1000:.3f}\x1b[0m \x1b[3mms\x1b[0m'
-            if debug:
-                console = Console()
-                with console.capture() as capture:
-                    urlp = urlsplit(str(request.url))
-                    url = urlunsplit(urlp._replace(path=unquote(urlp.path), scheme=request.scheme, netloc=request.host))
-                    console.print(
-                        Panel.fit(
-                            f"[b cyan]{request.method}[/] [u blue]{url}[/] [b]HTTP/[red]{request.scope["http_version"]}",
-                            box=ROUNDED,
-                            title="[b red]URL", 
-                            border_style="cyan", 
-                        ), 
-                    )
-                    headers = {str(k, 'latin-1'): str(v, 'latin-1') for k, v in request.headers}
-                    console.print(
-                        Panel.fit(
-                            highlight_json(headers), 
-                            box=ROUNDED, 
-                            title="[b red]HEADERS", 
-                            border_style="cyan", 
-                        )
-                    )
-                    scope = {k: v for k, v in request.scope.items() if k != "headers"}
-                    console.print(
-                        Panel.fit(
-                            highlight_json(scope), 
-                            box=ROUNDED, 
-                            title="[b red]SCOPE", 
-                            border_style="cyan", 
-                        )
-                    )
-                message += "\n" + capture.get()
-            return message
-        try:
-            response = await handler(request)
-            logger.info(get_message(response))
-        except Exception as e:
-            response = await redirect_exception_response(app, request, e)
-            logger.error(get_message(response))
-            if debug:
-                raise
-        return response
 
     # NOTE: 下面是一些工具函数
 

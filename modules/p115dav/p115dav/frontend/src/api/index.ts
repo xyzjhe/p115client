@@ -4,32 +4,21 @@ export interface Ancestor {
   id: number;
   parent_id: number;
   name: string;
-  is_directory: boolean;
 }
 
 export interface FileInfo {
-  id: number;
-  parent_id: number;
+  is_dir: boolean;
+  id: number | string;
+  parent_id: number | string;
   name: string;
-  path: string;
+  sha1: string;
+  size: number;
   pickcode: string;
-  is_directory: boolean;
-  sha1: string | null;
-  size: number | null;
-  format_size: string;
   ico: string;
-  ctime: number;
   mtime: number;
-  atime: number;
   thumb: string;
-  star: boolean;
-  labels: any[];
-  score: number;
-  hidden: boolean;
-  described: boolean;
-  ancestors: Ancestor[];
+  type: number;
   url?: string;
-  short_url?: string;
 }
 
 export type FileListResponse = FileInfo[];
@@ -60,11 +49,11 @@ export const getFileAttr = (params: {
  */
 export const getList = (params: {
   pickcode?: string;
-  id?: number;
+  id?: number | string;
   path?: string;
 }) =>
   defHttp.get<FileListResponse>({
-    url: `/list`,
+    url: `http://localhost:8000/<list`,
     params,
   });
 

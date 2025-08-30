@@ -196,7 +196,7 @@ def iter_fs_files_serialized(
         client = P115Client(client, check_for_relogin=True)
     if page_size <= 0:
         page_size = 7_000
-    fs_files: Callable[..., Awaitable[dict]]
+    fs_files: Callable
     if not isinstance(client, P115Client) or app == "open":
         page_size = min(page_size, 1150)
         fs_files = client.fs_files_open
@@ -204,6 +204,9 @@ def iter_fs_files_serialized(
         page_size = min(page_size, 1150)
         request_kwargs.setdefault("base_url", get_webapi_origin)
         fs_files = client.fs_files
+    elif app == "aps":
+        page_size = min(page_size, 1200)
+        fs_files = client.fs_files_aps
     else:
         request_kwargs.setdefault("base_url", get_proapi_origin)
         request_kwargs["app"] = app
@@ -308,6 +311,9 @@ def iter_fs_files_threaded(
         page_size = min(page_size, 1150)
         request_kwargs.setdefault("base_url", get_webapi_origin)
         fs_files = client.fs_files
+    elif app == "aps":
+        page_size = min(page_size, 1200)
+        fs_files = client.fs_files_aps
     else:
         request_kwargs.setdefault("base_url", get_proapi_origin)
         request_kwargs["app"] = app
@@ -440,6 +446,9 @@ async def iter_fs_files_asynchronized(
         page_size = min(page_size, 1150)
         request_kwargs.setdefault("base_url", get_webapi_origin)
         fs_files = client.fs_files
+    elif app == "aps":
+        page_size = min(page_size, 1200)
+        fs_files = client.fs_files_aps
     else:
         request_kwargs.setdefault("base_url", get_proapi_origin)
         request_kwargs["app"] = app

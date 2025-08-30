@@ -38,10 +38,10 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: false,
         },
-        "/ws": {
-          target: "ws://127.0.0.1",
-          ws: true,
-        },
+        // "/ws": {
+        //   target: "ws://127.0.0.1",
+        //   ws: true,
+        // },
       },
     },
     build: {

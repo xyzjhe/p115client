@@ -182,16 +182,17 @@ def update_resp_ancestors(
     /, 
     error: None | OSError = FileNotFoundError(ENOENT, "not found"), 
 ) -> dict:
-    list_append = list.append
+    ancestors: list[dict] = []
+    add_ancestor = ancestors.append
     need_update_id_to_dirnode = id_to_dirnode not in (..., None)
     if "path" in resp:
-        ancestors = resp["ancestors"] = []
+        resp["ancestors"] = ancestors
         start_idx = not resp["path"][0]["cid"]
         if start_idx:
-            list_append(ancestors, {"id": 0, "parent_id": 0, "name": ""})
+            add_ancestor({"id": 0, "parent_id": 0, "name": ""})
         for info in resp["path"][start_idx:]:
             id, name, pid = int(info["cid"]), info["name"], int(info["pid"])
-            list_append(ancestors, {"id": id, "parent_id": pid, "name": name})
+            add_ancestor({"id": id, "parent_id": pid, "name": name})
             if need_update_id_to_dirnode:
                 cast(MutableMapping, id_to_dirnode)[id] = (name, pid)
     else:
@@ -202,24 +203,29 @@ def update_resp_ancestors(
             if error is None:
                 return resp
             raise error
-        ancestors = resp["ancestors"] = []
-        pid = int(resp["paths"][0]["file_id"])
+        if "file_id" in resp:
+            resp["file_id"] = int(resp["file_id"])
+        else:
+            resp["file_id"] = to_id(resp["pick_code"])
+        resp["ancestors"] = ancestors
+        info = resp["paths"][0]
+        pid = int(info["file_id"])
+        if pid:
+            ancestors.append({"id": pid, "name": info["file_name"]})
+            warn(f"found a dangling node: {resp!r}", category=P115Warning)
+        else:
+            ancestors.append({"id": 0, "parent_id": 0, "name": ""})
         for info in resp["paths"][1:]:
             id = int(info["file_id"])
             name = info["file_name"]
-            list_append(ancestors, {"id": id, "parent_id": pid, "name": name})
+            add_ancestor({"id": id, "parent_id": pid, "name": name})
             if need_update_id_to_dirnode:
                 cast(MutableMapping, id_to_dirnode)[id] = (name, pid)
             pid = id
-        if not resp["sha1"]:
-            if "file_id" in resp:
-                id = int(resp["file_id"])
-            else:
-                id = to_id(resp["pick_code"])
-            name = resp["file_name"]
-            list_append(ancestors, {"id": id, "parent_id": pid, "name": name})
-            if need_update_id_to_dirnode:
-                cast(MutableMapping, id_to_dirnode)[id] = (name, pid)
+        name = resp["file_name"]
+        add_ancestor({"id": resp["file_id"], "parent_id": pid, "name": name})
+        if need_update_id_to_dirnode and not resp["sha1"]:
+            cast(MutableMapping, id_to_dirnode)[id] = (name, pid)
     return resp
 
 
@@ -2329,9 +2335,9 @@ def iter_nodes_skim(
     """
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
-    def get_nodes(resp: dict, /) -> Sequence[dict]:
+    def get_nodes(resp: dict, /) -> list[dict]:
         if resp.get("error") == "文件不存在":
-            return ()
+            return []
         check_response(resp)
         nodes = resp["data"]
         for node in nodes:
