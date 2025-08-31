@@ -10,14 +10,12 @@ __all__ = [
     "ID_TO_DIRNODE_CACHE", "WEPAPI_PREFIXES", 
 ]
 
-from collections.abc import Iterator, MutableMapping
+from collections import defaultdict
+from collections.abc import MutableMapping
 from pathlib import Path
-from threading import Lock
 from typing import Final
 
-from orjson import dumps, loads
 from iter_collect import grouped_mapping
-from sqlitedict import SqliteDict
 
 
 _CACHE_DIR = Path("~/.p115client.cache.d").expanduser()
@@ -238,24 +236,8 @@ TYPE_TO_SUFFIXES: Final[dict[int, tuple[str, ...]]] = {
     k: tuple(v) for k, v in grouped_mapping(
         (v, k) for k, v in SUFFIX_TO_TYPE.items()).items()}
 
-from .type import DirNode
-
-class _DirNodeCache(dict):
-
-    def __missing__(self, key):
-        d = self[key] = SqliteDict(
-            _CACHE_DIR / f"dirnode.{key}.db", 
-            value_dumps=dumps, 
-            value_loads=loads, 
-            lock=Lock(), 
-        )
-        return d
-
-    def iter_items(self, key: int | str, /) -> Iterator[tuple[int, DirNode]]:
-        return ((k, DirNode(*v)) for k, v in self[key].items())
-
 #: 用于缓存每个用户或者分享，的每个目录 id 到所对应的 (name, parent_id) 的元组的字典的字典
-ID_TO_DIRNODE_CACHE: Final[dict[int | str, MutableMapping[int, tuple[str, int]]]] = _DirNodeCache()
+ID_TO_DIRNODE_CACHE: Final[dict[int | str, MutableMapping[int, tuple[str, int]]]] = defaultdict(dict)
 
 #: 一些 webapi.115.com 的接口允许的前缀
 WEPAPI_PREFIXES = (

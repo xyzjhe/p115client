@@ -952,7 +952,7 @@ SELECT data.parent_id, count.* FROM count JOIN data USING (id)"""
         parent_id: int = 0, 
         /, 
     ) -> Iterator[dict]:
-        """迭代获取所有指定 id 下所有目录节点（包括自己）直属的文件数和目录数，以及子树下的文件数合计和目录🌲合计
+        """迭代获取所有指定 id 下所有目录节点（包括自己）直属的文件数和目录数，以及子树下的文件数合计和目录数合计
 
         :param self: P115QueryDB 实例或者数据库连接或游标
         :param parent_id: 顶层目录的 id

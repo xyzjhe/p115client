@@ -43,11 +43,11 @@ from iterutils import (
 )
 from iter_collect import iter_keyed_dups, SupportsLT
 from orjson import loads
-from p115client import (
-    check_response, normalize_attr, 
-    P115Client, P115OpenClient, P115OSError, P115Warning, 
-)
+from p115client import check_response, normalize_attr, P115Client, P115OpenClient
 from p115client.const import ID_TO_DIRNODE_CACHE
+from p115client.exception import (
+    P115FileNotFoundError, P115OSError, P115Warning, 
+)
 from p115client.type import DirNode
 from p115pickcode import pickcode_to_id, to_id
 from posixpatht import splitext
@@ -138,41 +138,48 @@ def make_path_binder(
         if not dirname and (node := id_to_dirnode.get(pid)):
             dirname = id_to_path[pid] = get_path(node) + "/"
         return dirname + name
-    if with_ancestors:
-        id_to_node = {0: {"id": 0, "parent_id": 0, "name": ""}}
-        push = list.append
-        def get_ancestors(id: int, attr: None | Mapping | tuple[str, int] = None, /) -> list[dict]:
-            if not id:
-                return [id_to_node[0]]
-            elif attr is None:
-                name, pid = id_to_dirnode[id]
-            elif isinstance(attr, Mapping):
-                pid = attr["parent_id"]
-                name = attr["name"]
+    id_to_node = {0: {"id": 0, "parent_id": 0, "name": ""}}
+    push = list.append
+    def get_ancestors(id: int, attr: None | Mapping | tuple[str, int] = None, /) -> list[dict]:
+        if not id:
+            return [id_to_node[0]]
+        elif attr is None:
+            name, pid = id_to_dirnode[id]
+        elif isinstance(attr, Mapping):
+            pid = attr["parent_id"]
+            name = attr["name"]
+        else:
+            name, pid = attr
+        ancestors: list[dict] = []
+        while True:
+            if id in id_to_node:
+                ancestor = id_to_node[id]
             else:
-                name, pid = attr
-            ancestors: list[dict] = []
-            while True:
-                if id in id_to_node:
-                    ancestor = id_to_node[id]
-                else:
-                    ancestor = id_to_node[id] = {"id": id, "parent_id": pid, "name": name}
-                push(ancestors, ancestor)
-                if not pid:
-                    push(ancestors, id_to_node[0])
-                    break
-                id = pid
-                try:
-                    name, pid = id_to_dirnode[id]
-                except KeyError:
-                    break
-            ancestors.reverse()
-            return ancestors
+                ancestor = id_to_node[id] = {"id": id, "parent_id": pid, "name": name}
+            push(ancestors, ancestor)
+            if not pid:
+                push(ancestors, id_to_node[0])
+                break
+            id = pid
+            try:
+                name, pid = id_to_dirnode[id]
+            except KeyError:
+                break
+        ancestors.reverse()
+        return ancestors
     def bind[D: dict](attr: D, /) -> D:
-        attr[key_of_path] = get_path(attr)
-        if with_ancestors:
-            attr[key_of_ancestors] = get_ancestors(attr["id"], attr)
+        if "name" in attr:
+            attr[key_of_path] = get_path(attr)
+            if with_ancestors:
+                attr[key_of_ancestors] = get_ancestors(attr["id"], attr)
+        else:
+            pid = attr["parent_id"]
+            attr[key_of_path] = get_path(id_to_dirnode[pid])
+            if with_ancestors:
+                attr[key_of_ancestors] = get_ancestors(pid)
         return attr
+    setattr(bind, "get_path", get_path)
+    setattr(bind, "get_ancestors", get_ancestors)
     return bind
 
 
@@ -223,7 +230,8 @@ def update_resp_ancestors(
                 cast(MutableMapping, id_to_dirnode)[id] = (name, pid)
             pid = id
         name = resp["file_name"]
-        add_ancestor({"id": resp["file_id"], "parent_id": pid, "name": name})
+        id = resp["file_id"]
+        add_ancestor({"id": id, "parent_id": pid, "name": name})
         if need_update_id_to_dirnode and not resp["sha1"]:
             cast(MutableMapping, id_to_dirnode)[id] = (name, pid)
     return resp
@@ -380,18 +388,10 @@ def ensure_attr_path[D: dict](
         id_to_dirnode = ID_TO_DIRNODE_CACHE[client.user_id]
     elif id_to_dirnode is ...:
         id_to_dirnode = {}
-    if not isinstance(client, P115Client) or app == "open":
-        get_info: Callable = client.fs_info_open
-        app = "open"
-    elif app in ("", "web", "desktop", "harmony"):
-        request_kwargs.setdefault("base_url", cycle(("http://web.api.115.com", "https://webapi.115.com")).__next__)
-        get_info = client.fs_category_get
-    else:
-        request_kwargs.setdefault("base_url", cycle(("http://pro.api.115.com", "https://proapi.115.com")).__next__)
-        get_info = partial(client.fs_category_get_app, app=app)
     bind = make_path_binder(id_to_dirnode, escape=escape, with_ancestors=with_ancestors)
     dangling_ids: set[int] = set()
     def gen_step():
+        from .attr import get_info
         with with_iter_next(attrs) as get_next:
             while True:
                 attr = yield get_next()
@@ -399,9 +399,16 @@ def ensure_attr_path[D: dict](
                 while pid and pid in id_to_dirnode:
                     pid = id_to_dirnode[pid][1]
                 if pid and pid not in dangling_ids:
-                    resp = yield get_info(pid, async_=async_, **request_kwargs)
-                    resp = update_resp_ancestors(resp, id_to_dirnode, None)
-                    if not resp:
+                    try:
+                        yield get_info(
+                            client, 
+                            pid, 
+                            id_to_dirnode=id_to_dirnode, 
+                            app=app, 
+                            async_=async_, 
+                            **request_kwargs, 
+                        )
+                    except P115FileNotFoundError:
                         dangling_ids.add(pid)
                 bind(attr)
                 if top_path := attr.get("top_path"):
@@ -944,6 +951,7 @@ def iter_dirs(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = 1, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -956,6 +964,7 @@ def iter_dirs(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = 1, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -967,6 +976,7 @@ def iter_dirs(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = 1, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -978,6 +988,7 @@ def iter_dirs(
     :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
     :param app: 使用指定 app（设备）的接口
     :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
+    :param max_dirs: 估计最大存在的目录数，<= 0 时则无限
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
 
@@ -991,6 +1002,7 @@ def iter_dirs(
         id_to_dirnode=id_to_dirnode, 
         app=app, 
         max_workers=max_workers, 
+        max_page=max_dirs and -(-max_dirs // 3000), 
         async_=async_, # type: ignore
         **request_kwargs, 
     )
@@ -1005,6 +1017,7 @@ def iter_dirs_with_path(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = None, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -1019,6 +1032,7 @@ def iter_dirs_with_path(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = None, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -1032,6 +1046,7 @@ def iter_dirs_with_path(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = None, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -1051,6 +1066,7 @@ def iter_dirs_with_path(
     :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
     :param app: 使用指定 app（设备）的接口
     :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
+    :param max_dirs: 估计最大存在的目录数，<= 0 时则无限
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
 
@@ -1077,6 +1093,7 @@ def iter_dirs_with_path(
             id_to_dirnode=id_to_dirnode, 
             app=app, 
             max_workers=max_workers, 
+            max_page=max_dirs and -(-max_dirs // 3000), 
             async_=async_, # type: ignore
             **request_kwargs, 
         ))
@@ -1245,6 +1262,7 @@ def iter_files_with_path(
     app: str = "android", 
     cooldown: None | float = 0.5, 
     max_workers: None | int = None, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -1269,6 +1287,7 @@ def iter_files_with_path(
     app: str = "android", 
     cooldown: None | float = 0.5, 
     max_workers: None | int = None, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -1292,6 +1311,7 @@ def iter_files_with_path(
     app: str = "android", 
     cooldown: None | float = 0.5, 
     max_workers: None | int = None, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -1339,6 +1359,7 @@ def iter_files_with_path(
     :param app: 使用指定 app（设备）的接口
     :param cooldown: 冷却时间，单位为秒。如果为 None，则用默认值（非并发时为 0，并发时为 1）
     :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
+    :param max_dirs: 估计最大存在的目录数，<= 0 时则无限
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
 
@@ -1417,6 +1438,7 @@ def iter_files_with_path(
                     files=False, 
                     id_to_dirnode=id_to_dirnode, 
                     max_workers=None, 
+                    max_page=max_dirs and -(-max_dirs // 3000), 
                     async_=async_, 
                     **request_kwargs, 
                 ))
@@ -1475,16 +1497,19 @@ def iter_files_with_path(
         return run_gen_step_iter(gen_step, async_)
 
 
+# TODO: 如果测试 iter_download_files 性能不错，就把这个的实现用那个
 @overload
 def iter_files_with_path_skim(
     client: str | PathLike | P115Client, 
     cid: int | str = 0, 
-    with_ancestors: bool = False, 
     escape: None | bool | Callable[[str], str] = True, 
+    with_ancestors: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     path_already: bool = False, 
-    app: str = "android", 
     max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
+    app: str = "android", 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -1494,12 +1519,14 @@ def iter_files_with_path_skim(
 def iter_files_with_path_skim(
     client: str | PathLike | P115Client, 
     cid: int | str = 0, 
-    with_ancestors: bool = False, 
     escape: None | bool | Callable[[str], str] = True, 
+    with_ancestors: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     path_already: bool = False, 
-    app: str = "android", 
     max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
+    app: str = "android", 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -1508,12 +1535,14 @@ def iter_files_with_path_skim(
 def iter_files_with_path_skim(
     client: str | PathLike | P115Client, 
     cid: int | str = 0, 
-    with_ancestors: bool = False, 
     escape: None | bool | Callable[[str], str] = True, 
+    with_ancestors: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     path_already: bool = False, 
-    app: str = "android", 
     max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
+    app: str = "android", 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -1522,7 +1551,6 @@ def iter_files_with_path_skim(
 
     :param client: 115 客户端或 cookies
     :param cid: 目录 id 或 pickcode
-    :param with_ancestors: 文件信息中是否要包含 "ancestors"
     :param escape: 对文件名进行转义
 
         - 如果为 None，则不处理；否则，这个函数用来对文件名中某些符号进行转义，例如 "/" 等
@@ -1530,10 +1558,13 @@ def iter_files_with_path_skim(
         - 如果为 False，则使用 `posix_escape_name` 函数对名字进行转义，会把文件名中的 "/" 转换为 "|"
         - 如果为 Callable，则用你所提供的调用，以或者转义后的名字
 
+    :param with_ancestors: 文件信息中是否要包含 "ancestors"
     :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
     :param path_already: 如果为 True，则说明 id_to_dirnode 中已经具备构建路径所需要的目录节点，所以不会再去拉取目录节点的信息
-    :param app: 使用指定 app（设备）的接口
     :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
+    :param max_files: 估计最大存在的文件数，<= 0 时则无限
+    :param max_dirs: 估计最大存在的目录数，<= 0 时则无限
+    :param app: 使用指定 app（设备）的接口
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
 
@@ -1591,6 +1622,7 @@ def iter_files_with_path_skim(
             files=True, 
             ensure_name=True, 
             max_workers=max_workers, 
+            max_page=max_files and -(-max_files // 3000), 
             app=app, 
             async_=async_, 
             **request_kwargs, 
@@ -1629,6 +1661,7 @@ def iter_files_with_path_skim(
                     files=False, 
                     id_to_dirnode=id_to_dirnode, 
                     max_workers=max_workers, 
+                    max_page=max_dirs and -(-max_dirs // 3000), 
                     async_=async_, 
                     **request_kwargs, 
                 ))
@@ -1657,7 +1690,6 @@ def iter_files_with_path_skim(
                 path_not_already = False
             else:
                 path_not_already = BoolRaise(exc)
-            path_already = True
         def gen_step():
             cache: list[dict] = []
             add_to_cache = cache.append
@@ -1677,6 +1709,7 @@ def iter_files_with_path_skim(
                 files=True, 
                 ensure_name=True, 
                 max_workers=max_workers, 
+                max_page=max_files and -(-max_files // 3000), 
                 app=app, 
                 async_=async_, 
                 **request_kwargs, 
@@ -1998,6 +2031,8 @@ def traverse_tree(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -2010,6 +2045,8 @@ def traverse_tree(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -2021,6 +2058,8 @@ def traverse_tree(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -2032,6 +2071,8 @@ def traverse_tree(
     :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
     :param app: 使用指定 app（设备）的接口
     :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
+    :param max_files: 估计最大存在的文件数，<= 0 时则无限
+    :param max_dirs: 估计最大存在的目录数，<= 0 时则无限
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
 
@@ -2059,6 +2100,7 @@ def traverse_tree(
             id_to_dirnode=id_to_dirnode, 
             app=app, 
             max_workers=max_workers, 
+            max_page=max_files and -(-max_files // 3000), 
             async_=async_, 
             **request_kwargs, 
         )
@@ -2070,10 +2112,11 @@ def traverse_tree(
                 id_to_dirnode=id_to_dirnode, 
                 app=app, 
                 max_workers=max_workers, 
+                max_page=max_dirs and -(-max_dirs // 3000), 
                 async_=async_, 
                 **request_kwargs, 
             )))
-        if isinstance(task, Task):
+        if async_:
             yield task
         else:
             task.result()
@@ -2091,6 +2134,8 @@ def traverse_tree_with_path(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -2105,6 +2150,8 @@ def traverse_tree_with_path(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -2118,6 +2165,8 @@ def traverse_tree_with_path(
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     app: str = "android", 
     max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -2137,6 +2186,8 @@ def traverse_tree_with_path(
     :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
     :param app: 使用指定 app（设备）的接口
     :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
+    :param max_files: 估计最大存在的文件数，<= 0 时则无限
+    :param max_dirs: 估计最大存在的目录数，<= 0 时则无限
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
 
@@ -2148,12 +2199,6 @@ def traverse_tree_with_path(
         id_to_dirnode = ID_TO_DIRNODE_CACHE[client.user_id]
     elif id_to_dirnode is ...:
         id_to_dirnode = {}
-    if isinstance(escape, bool):
-        if escape:
-            from posixpatht import escape
-        else:
-            escape = posix_escape_name
-    escape = cast(None | Callable[[str], str], escape)
     from .download import iter_download_nodes
     to_pickcode = client.to_pickcode
     def fulfill_dir_node(attr: dict, /) -> dict:
@@ -2170,9 +2215,11 @@ def traverse_tree_with_path(
             id_to_dirnode=id_to_dirnode, 
             app=app, 
             max_workers=max_workers, 
+            max_page=max_files and -(-max_files // 3000), 
             async_=async_, 
             **request_kwargs, 
         )
+        add_top = _make_top_adder(to_id(cid), id_to_dirnode, escape)
         with cache_loading(files) as (cache, task):
             yield YieldFrom(do_map(fulfill_dir_node, iter_dirs_with_path(
                 client, 
@@ -2182,22 +2229,38 @@ def traverse_tree_with_path(
                 id_to_dirnode=id_to_dirnode, 
                 app=app, 
                 max_workers=max_workers, 
+                max_dirs=max_dirs, 
+                async_=async_, # type: ignore
+                **request_kwargs, 
+            )))
+            cache2 = cache.copy()
+            yield YieldFrom(do_map(add_top, ensure_attr_path(
+                client, 
+                cache2, 
+                with_ancestors=with_ancestors, 
+                escape=escape, 
+                id_to_dirnode=id_to_dirnode, 
+                app=app, 
                 async_=async_, 
                 **request_kwargs, 
             )))
-        if isinstance(task, Task):
+        if async_:
             yield task
         else:
             task.result()
-        add_top = _make_top_adder(to_id(cid), id_to_dirnode, escape)
+        if len(cache2) < len(cache):
+            files = chain(cache[len(cache2):], files) # type: ignore
+        else:
+            del cache
+        del cache2
         yield YieldFrom(do_map(add_top, ensure_attr_path(
             client, 
-            chain(cache, files), # type: ignore
+            files, # type: ignore
             with_ancestors=with_ancestors, 
             escape=escape, 
             id_to_dirnode=id_to_dirnode, 
             app=app, 
-            async_=async_, 
+            async_=async_, # type: ignore
             **request_kwargs, 
         )))
     return run_gen_step_iter(gen_step, async_)

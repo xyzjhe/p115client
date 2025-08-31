@@ -22,13 +22,14 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 from functools import partial
-from itertools import batched, chain, count, cycle
+from itertools import batched, chain, count, cycle, repeat
 from math import inf
-from os import fsdecode, makedirs, remove, rmdir, scandir, DirEntry, PathLike
+from os import cpu_count, fsdecode, makedirs, remove, rmdir, scandir, DirEntry, PathLike
 from os.path import abspath, dirname, join as joinpath, normpath, splitext
 from queue import SimpleQueue
 from sqlite3 import connect, Connection, Cursor
 from sys import exc_info
+from threading import Lock
 from time import time
 from typing import cast, overload, Any, Literal
 from types import EllipsisType
@@ -1436,8 +1437,6 @@ def make_strm(
     return run_gen_step(gen_step, async_)
 
 
-# TODO: 启动后，尝试往后探测一下最后一页的边界，然后从后往前拉，因为后面的响应更久，放到前面则可以使总的等待时间更短
-# TODO: 一部分从前往后，一部分从后往前，因为直接从后往前，会导致连接池复用性太低，因为后面的请求要占用很久
 @overload
 def iter_download_nodes(
     client: str | PathLike | P115Client, 
@@ -1446,6 +1445,7 @@ def iter_download_nodes(
     ensure_name: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = ..., 
     max_workers: None | int = 1, 
+    max_page: int | None = 0, 
     app: str = "android", 
     *, 
     async_: Literal[False] = False, 
@@ -1460,6 +1460,7 @@ def iter_download_nodes(
     ensure_name: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = ..., 
     max_workers: None | int = 1, 
+    max_page: int | None = 0, 
     app: str = "android", 
     *, 
     async_: Literal[True], 
@@ -1473,6 +1474,7 @@ def iter_download_nodes(
     ensure_name: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = ..., 
     max_workers: None | int = 1, 
+    max_page: int | None = 0, 
     app: str = "android", 
     *, 
     async_: Literal[False, True] = False, 
@@ -1480,12 +1482,23 @@ def iter_download_nodes(
 ) -> Iterator[dict] | AsyncIterator[dict]:
     """获取一个目录内所有的文件或者目录的信息（简略）
 
+    .. caution::
+        不要在不确定的情况下，给 ``max_page`` 设置一个特别大的值，这会大致大量无用的请求，导致服务器繁忙，响应效率低下    
+
+        对于 ``x`` 个文件或目录，相应的 ``d, r = divmod(x, 3000); max_page += (r > 0)``，或者 ``max_page = -(-x // 3000)``
+
     :param client: 115 客户端或 cookies
     :param pickcode: 目录的 pickcode 或 id
     :param files: 如果为 True，则只获取文件，否则只获取目录
     :param ensure_name: 确保返回数据中有 "name" 字段
     :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
     :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
+    :param max_page: 要拉取的最大页码（页码从 1 开始计数）
+
+        - 如果为 None，则页码从小到大拉取，并会尝试获取总文件数，当获取到后且还在运行中，则从后往前拉取
+        - 如果 > 0，则页码从大到小拉取
+        - 如果 <= 0，则页码从小到大拉取
+
     :param app: 使用指定 app（设备）的接口
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
@@ -1495,7 +1508,7 @@ def iter_download_nodes(
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
     if max_workers is None or max_workers <= 0:
-        max_workers = 20 if async_ else None
+        max_workers = 20 if async_ else min(32, (cpu_count() or 1) + 4)
     if files:
         get_nodes = client.download_files
     else:
@@ -1559,7 +1572,11 @@ def iter_download_nodes(
     }
     if max_workers == 1:
         def iter_list(pickcode: str, /):
-            for i in count(1):
+            if max_page and max_page > 0:
+                cnt: Iterable[int] = range(1, max_page + 1)
+            else:
+                cnt = count(1)
+            for i in cnt:
                 resp: dict = yield get_nodes(
                     {"pickcode": pickcode, "page": i}, 
                     async_=async_, 
@@ -1569,27 +1586,81 @@ def iter_download_nodes(
                 if not resp["has_next_page"]:
                     break
     else:
-        next_page = count(1).__next__
+        def set_max_page(page: int, /):
+            nonlocal max_page
+            max_page = page
+            for i, p in enumerate(task_page):
+                task = task_list[i]
+                if task and p > page:
+                    task.cancel()
+                    countdown(i)
+        if max_page and max_page > 0:
+            from_first = False
+            next_page = iter(range(max_page, 0, -1)).__next__
+        elif max_page is None:
+            from_first = True
+            max_page = 0
+            cid = to_id(pickcode)
+            if async_:
+                task: Any = create_task(client.fs_category_get_app(cid, app=app, async_=True, **request_kwargs))
+            else:
+                task = run_as_thread(client.fs_category_get_app, cid, app=app, **request_kwargs)
+            def callback(fu, /):
+                nonlocal task
+                try:
+                    resp = fu.result()
+                    if files:
+                        count = int(resp["count"])
+                    else:
+                        count = int(resp["folder_count"])
+                    set_max_page(-(-count // 3000))
+                finally:
+                    task = None
+            task.add_done_callback(callback)
+            def next_page_iter():
+                nonlocal from_first
+                for i in count(1):
+                    yield i
+                    if max_page and task is None:
+                        break
+                from_first = False
+                for i in range(cast(int, max_page), i, -1):
+                    yield i
+            next_page = next_page_iter().__next__
+        else:
+            if max_page < 0:
+                max_page = 0
+            from_first = True
+            next_page = count(1).__next__
         sentinel = object()
-        max_page = 0
         if async_:
             q: AsyncQueue | SimpleQueue = AsyncQueue()
         else:
             q = SimpleQueue()
+            lock = Lock()
         get, put = q.get, q.put_nowait
         task_list: list = []
         task_page: list[int] = []
         task_ids: set[int] = set()
         discard_task_id = task_ids.discard
         def countdown(task_id, /):
+            task_list[task_id] = None
             discard_task_id(task_id)
             if not task_ids:
                 put(sentinel)
         def request(task_id, pickcode: str, /):
-            nonlocal max_page
             try:
-                page = next_page()
-                while not max_page or page < max_page:
+                while True:
+                    if async_:
+                        page = next_page()
+                    else:
+                        with lock:
+                            page = next_page()
+                    if max_page and page > max_page:
+                        if from_first:
+                            break
+                        else:
+                            continue
                     task_page[task_id] = page
                     resp: dict = yield get_nodes(
                         {"pickcode": pickcode, "page": page}, 
@@ -1598,14 +1669,9 @@ def iter_download_nodes(
                     )
                     put(resp["list"])
                     if not resp["has_next_page"]:
-                        if not max_page or page < max_page:
-                            max_page = page
-                            for i, p in enumerate(task_page):
-                                if p > page:
-                                    task_list[i].cancel()
-                                    countdown(i)
-                        break
-                    page = next_page()
+                        set_max_page(page)
+            except StopIteration:
+                pass
             except BaseException as e:
                 put(e)
             finally:
@@ -1624,9 +1690,11 @@ def iter_download_nodes(
                 submit = executor.submit
                 shutdown = lambda: executor.shutdown(False, cancel_futures=True)
             try:
+                task_ids.update(range(n))
+                task_list.extend(repeat(None, n))
+                task_page.extend(repeat(0, n))
                 for i in range(n):
-                    task_page.append(0)
-                    task_list.append(submit(run_gen_step, request(i, pickcode), async_))
+                    task_list[i] = submit(run_gen_step, request(i, pickcode), async_)
                 while True:
                     if async_:
                         resp = yield get()
@@ -1679,13 +1747,14 @@ def iter_download_nodes(
 def iter_download_files(
     client: str | PathLike | P115Client, 
     cid: int | str = 0, 
-    id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
+    ensure_name: bool = False, 
     escape: None | bool | Callable[[str], str] = True, 
     with_ancestors: bool = False, 
-    with_url: bool = False, 
+    id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     path_already: bool = False, 
-    user_agent: None | str = None, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 1, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     app: str = "android", 
     *, 
     async_: Literal[False] = False, 
@@ -1696,13 +1765,14 @@ def iter_download_files(
 def iter_download_files(
     client: str | PathLike | P115Client, 
     cid: int | str = 0, 
-    id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
+    ensure_name: bool = False, 
     escape: None | bool | Callable[[str], str] = True, 
     with_ancestors: bool = False, 
-    with_url: bool = False, 
+    id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     path_already: bool = False, 
-    user_agent: None | str = None, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 1, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     app: str = "android", 
     *, 
     async_: Literal[True], 
@@ -1712,26 +1782,24 @@ def iter_download_files(
 def iter_download_files(
     client: str | PathLike | P115Client, 
     cid: int | str = 0, 
-    id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
+    ensure_name: bool = False, 
     escape: None | bool | Callable[[str], str] = True, 
     with_ancestors: bool = False, 
-    with_url: bool = False, 
+    id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
     path_already: bool = False, 
-    user_agent: None | str = None, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 1, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     app: str = "android", 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
 ) -> Iterator[dict] | AsyncIterator[dict]:
-    """获取一个目录内所有的文件信息（简略），且包括 "dir_ancestors"、"dirname"
-
-    .. note::
-        并不提供文件的 name，如果需要获得 name，你可以在之后获取下载链接，然后从下载链接中获取实际的名字
+    """获取一个目录内所有的文件信息，不包括目录
 
     :param client: 115 客户端或 cookies
     :param cid: 目录 id 或 pickcode
-    :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
+    :param ensure_name: 确保返回数据中有 "name" 字段
     :param escape: 对文件名进行转义
 
         - 如果为 None，则不处理；否则，这个函数用来对文件名中某些符号进行转义，例如 "/" 等
@@ -1740,14 +1808,11 @@ def iter_download_files(
         - 如果为 Callable，则用你所提供的调用，以或者转义后的名字
 
     :param with_ancestors: 文件信息中是否要包含 "ancestors"
-    :param with_url: 文件信息中是否要包含 "url" 字段。
-
-        .. caution::
-            要求但如果实际上不包含 "url" 字段，则说明获取失败，文件可能违规了
-
+    :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
     :param path_already: 如果为 True，则说明 id_to_dirnode 中已经具备构建路径所需要的目录节点，所以不会再去拉取目录节点的信息
-    :param user_agent: 如果不为 None，则作为获取下载链接时，请求头 "user-agent" 的值
     :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
+    :param max_files: 估计最大存在的文件数，<= 0 时则无限
+    :param max_dirs: 估计最大存在的目录数，<= 0 时则无限
     :param app: 使用指定 app（设备）的接口
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
@@ -1760,55 +1825,14 @@ def iter_download_files(
         id_to_dirnode = ID_TO_DIRNODE_CACHE[client.user_id]
     elif id_to_dirnode is ...:
         id_to_dirnode = {}
-    if isinstance(escape, bool):
-        if escape:
-            from posixpatht import escape
-        else:
-            escape = posix_escape_name
-    escape = cast(None | Callable[[str], str], escape)
-    if with_ancestors:
-        id_to_node = {0: {"id": 0, "parent_id": 0, "name": ""}}
-        push = list.append
-        def get_ancestors(id: int, attr: None | Mapping | tuple[str, int] = None, /) -> list[dict]:
-            if not id:
-                return [id_to_node[0]]
-            elif attr is None:
-                name, pid = id_to_dirnode[id]
-            elif isinstance(attr, Mapping):
-                pid = attr["parent_id"]
-                name = attr["name"]
-            else:
-                name, pid = attr
-            ancestors: list[dict] = []
-            while True:
-                if id in id_to_node:
-                    ancestor = id_to_node[id]
-                else:
-                    ancestor = id_to_node[id] = {"id": id, "parent_id": pid, "name": name}
-                push(ancestors, ancestor)
-                if not pid:
-                    push(ancestors, id_to_node[0])
-                    break
-                id = pid
-                try:
-                    name, pid = id_to_dirnode[id]
-                except KeyError:
-                    break
-            ancestors.reverse()
-            return ancestors
-    id_to_path: dict[int, str] = {0: "/"}
-    def get_path(attr: Mapping | tuple[str, int], /) -> str:
-        if isinstance(attr, Mapping):
-            pid = attr["parent_id"]
-            name = attr["name"]
-        else:
-            name, pid = attr
-        if escape is not None:
-            name = escape(name)
-        dirname = id_to_path.get(pid, "")
-        if not dirname and (node := id_to_dirnode.get(pid)):
-            dirname = id_to_path[pid] = get_path(node) + "/"
-        return dirname + name
+    from .iterdir import make_path_binder
+    bind = make_path_binder(
+        id_to_dirnode, 
+        escape=escape, 
+        with_ancestors=with_ancestors, 
+        key_of_path="path" if ensure_name else "dirname", 
+        key_of_ancestors="ancestors" if ensure_name else "dir_ancestors", 
+    )
     root_ancestors = [{"id": 0, "parent_id": 0, "name": ""}]
     top_path: str = ""
     top_ancestors: list[dict]
@@ -1816,194 +1840,126 @@ def iter_download_files(
     if not top_id:
         top_path = "/"
         top_ancestors = root_ancestors
-    def update_attr_from_url(attr: dict, url: P115URL, /):
-        name = attr["name"] = url["name"]
-        if escape is not None:
-            name = escape(name)
-        dirname = attr["dirname"]
-        if dirname != "/":
-            dirname += "/"
-        attr["path"] = dirname + name
     def norm_attr(attr: dict, /):
         nonlocal top_path, top_ancestors
-        pid = attr["parent_id"]
-        if pid:
-            pnode = id_to_dirnode[pid]
-            if with_ancestors:
-                attr["dir_ancestors"] = get_ancestors(pid, pnode)
-            attr["dirname"] = get_path(pnode)
-        else:
-            if with_ancestors:
-                attr["dir_ancestors"] = root_ancestors
-            attr["dirname"] = "/"
+        bind(attr)
         if not top_path:
-            top_path = get_path(id_to_dirnode[top_id])
+            top_path = bind.get_path(id_to_dirnode[top_id]) # type: ignore
             if with_ancestors:
-                top_ancestors = get_ancestors(top_id, id_to_dirnode[top_id])
+                top_ancestors = bind.get_ancestors(top_id) # type: ignore
         attr["top_id"] = top_id
         attr["top_path"] = top_path
         if with_ancestors:
             attr["top_ancestors"] = top_ancestors
-        if with_url:
-            if async_:
-                async def set_url():
-                    try:
-                        url = attr["url"] = await client.download_url(
-                            attr["pickcode"], 
-                            user_agent=user_agent, 
-                            app="android", 
-                            async_=True, 
-                            **request_kwargs, 
-                        )
-                        update_attr_from_url(attr, url)
-                    except AccessError as e:
-                        warn(f"file is inaccessible: {e!r}")
-                    return attr
-                return set_url()
-            else:
-                try:
-                    url = attr["url"] = client.download_url(
-                        attr["pickcode"], 
-                        user_agent=user_agent, 
-                        app="android", 
-                        **request_kwargs, 
-                    )
-                    update_attr_from_url(attr, url)
-                except AccessError as e:
-                    warn(f"file is inaccessible: {e!r}")
         return attr
     if path_already:
-        if cid:
+        def iter_nonroot(pickcode: str, /):
             return do_map(norm_attr, iter_download_nodes(
                 client, 
-                client.to_pickcode(cid), 
-                files=True, 
-                max_workers=max_workers, 
-                app=app, 
-                async_=async_, 
-                **request_kwargs, 
-            ))
-        else:
-            def gen_step(pickcode: str, /):
-                pickcodes: list[str] = []
-                add_pickcode = pickcodes.append
-                with with_iter_next(iterdir(
-                    client, 
-                    id_to_dirnode=id_to_dirnode, 
-                    app=app, 
-                    raise_for_changed_count=True, 
-                    async_=async_, 
-                    **request_kwargs, 
-                )) as get_next:
-                    while True:
-                        attr = yield get_next()
-                        if attr["is_dir"]:
-                            add_pickcode(attr["pickcode"])
-                        else:
-                            attr = {
-                                "parent_id": attr["parent_id"], 
-                                "pickcode": attr["pickcode"], 
-                                "size": attr["size"], 
-                            }
-                            yield Yield(norm_attr(attr))
-                for pickcode in pickcodes:
-                    yield YieldFrom(run_gen_step_iter(gen_step(pickcode), async_))
-            return run_gen_step_iter(gen_step(client.to_pickcode(cid)), async_)
-    else:
-        ancestors_loaded: bool = False
-        def load_ancestors(pickcode: str, /):
-            return through(iter_download_nodes(
-                client, 
                 pickcode, 
-                files=False, 
-                id_to_dirnode=id_to_dirnode, 
+                files=True, 
+                ensure_name=ensure_name, 
                 max_workers=max_workers, 
+                max_page=max_files and -(-max_files // 3000), 
                 app=app, 
                 async_=async_, 
                 **request_kwargs, 
             ))
-        def set_ancestors_loaded(fu, /):
-            nonlocal ancestors_loaded
-            exc = fu.exception()
-            if exc is not None:
-                raise exc
-            ancestors_loaded = True
+    else:
         def gen_step(pickcode: str, /):
-            nonlocal ancestors_loaded
-            if pickcode:
-                if cid:
-                    from .iterdir import _iter_fs_files
-                    do_next: Callable = anext if async_ else next
-                    attr = yield do_next(_iter_fs_files(
-                        client, 
-                        to_id(cid), 
-                        page_size=1, 
-                        id_to_dirnode=id_to_dirnode, 
-                        normalize_attr=None, 
-                        escape=escape, 
-                        app=app, 
-                        async_=async_, 
-                        **request_kwargs, 
-                    ), None)
-                    if not attr:
-                        return
-                if async_:
-                    task: Any = create_task(load_ancestors(pickcode))
-                else:
-                    task = run_as_thread(load_ancestors, pickcode)
-                task.add_done_callback(set_ancestors_loaded)
-                cache: list[dict] = []
-                add_to_cache = cache.append
-                with with_iter_next(iter_download_nodes(
+            ancestors_loaded = False
+            def load_ancestors(pickcode: str, /):
+                return through(iter_download_nodes(
                     client, 
                     pickcode, 
-                    files=True, 
-                    max_workers=max_workers, 
-                    app=app, 
-                    async_=async_, 
-                    **request_kwargs, 
-                )) as get_next:
-                    while True:
-                        attr = yield get_next()
-                        if ancestors_loaded:
-                            if cache:
-                                yield YieldFrom(do_map(norm_attr, cache))
-                                cache.clear()
-                            yield Yield(norm_attr(attr))
-                        else:
-                            add_to_cache(attr)
-                if cache:
-                    if async_:
-                        yield task
-                    else:
-                        task.result()
-                    yield YieldFrom(do_map(norm_attr, cache))
-            else:
-                pickcodes: list[str] = []
-                add_pickcode = pickcodes.append
-                with with_iter_next(iterdir(
-                    client, 
+                    files=False, 
                     id_to_dirnode=id_to_dirnode, 
+                    max_workers=max_workers, 
+                    max_page=max_dirs and -(-max_dirs // 3000), 
                     app=app, 
-                    raise_for_changed_count=True, 
                     async_=async_, 
                     **request_kwargs, 
-                )) as get_next:
-                    while True:
-                        attr = yield get_next()
-                        if attr["is_dir"]:
-                            add_pickcode(attr["pickcode"])
-                        else:
-                            attr = {
-                                "parent_id": attr["parent_id"], 
-                                "pickcode": attr["pickcode"], 
-                                "size": attr["size"], 
-                            }
-                            yield Yield(norm_attr(attr))
-                for pickcode in pickcodes:
-                    yield YieldFrom(run_gen_step_iter(gen_step(pickcode), async_))
-                    ancestors_loaded = False
-    return run_gen_step_iter(gen_step(client.to_pickcode(cid)), async_)
+                ))
+            def set_ancestors_loaded(fu, /):
+                nonlocal ancestors_loaded
+                exc = fu.exception()
+                if exc is not None:
+                    raise exc
+                ancestors_loaded = True
+            if cid:
+                from .attr import get_ancestors
+                yield get_ancestors(
+                    client, 
+                    cid, 
+                    id_to_dirnode=id_to_dirnode, 
+                    ensure_file=False, 
+                    app=app, 
+                    async_=async_, 
+                    **request_kwargs, 
+                )
+            if async_:
+                task: Any = create_task(load_ancestors(pickcode))
+            else:
+                task = run_as_thread(load_ancestors, pickcode)
+            task.add_done_callback(set_ancestors_loaded)
+            cache: list[dict] = []
+            add_to_cache = cache.append
+            with with_iter_next(iter_download_nodes(
+                client, 
+                pickcode, 
+                files=True, 
+                ensure_name=ensure_name, 
+                max_workers=max_workers, 
+                max_page=max_files and -(-max_files // 3000), 
+                app=app, 
+                async_=async_, 
+                **request_kwargs, 
+            )) as get_next:
+                while True:
+                    attr = yield get_next()
+                    if ancestors_loaded:
+                        if cache:
+                            yield YieldFrom(do_map(norm_attr, cache))
+                            cache.clear()
+                        yield Yield(norm_attr(attr))
+                    else:
+                        add_to_cache(attr)
+            if cache:
+                if async_:
+                    yield task
+                else:
+                    task.result()
+                yield YieldFrom(do_map(norm_attr, cache))
+        def iter_nonroot(pickcode: str, /):
+            return run_gen_step_iter(gen_step(pickcode), async_)
+    if cid:
+        return iter_nonroot(client.to_pickcode(cid))
+    else:
+        def iter_root():
+            pickcodes: list[str] = []
+            add_pickcode = pickcodes.append
+            with with_iter_next(iterdir(
+                client, 
+                id_to_dirnode=id_to_dirnode, 
+                app=app, 
+                raise_for_changed_count=True, 
+                async_=async_, 
+                **request_kwargs, 
+            )) as get_next:
+                while True:
+                    attr = yield get_next()
+                    if attr["is_dir"]:
+                        add_pickcode(attr["pickcode"])
+                    else:
+                        attr = {
+                            "parent_id": attr["parent_id"], 
+                            "pickcode": attr["pickcode"], 
+                            "size": attr["size"], 
+                        }
+                        yield Yield(norm_attr(attr))
+            for pickcode in pickcodes:
+                yield YieldFrom(iter_nonroot(pickcode))
+        return run_gen_step_iter(iter_root, async_)
 
 
 @overload

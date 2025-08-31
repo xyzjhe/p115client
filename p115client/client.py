@@ -237,7 +237,7 @@ def check_response(resp: dict | Awaitable[dict], /) -> dict | Coroutine[Any, Any
             raise P115OSError(errno.EIO, resp)
         if resp.get("state", True):
             return resp
-        if code := get_first(resp, "errno", "errNo", "errcode", "errCode", "code", default=None):
+        if code := get_first(resp, "errno", "errNo", "errcode", "errCode", "code", "msg_code", default=None):
             resp.setdefault("errno", code)
             if "error" not in resp:
                 resp.setdefault("error", get_first(resp, "msg", "error_msg", "message", default=None))
@@ -461,8 +461,7 @@ def check_response(resp: dict | Awaitable[dict], /) -> dict | Coroutine[Any, Any
                 # {"state": 0, "errno": 40140136, "error": "redirect_uri 验证失败（防MITM）"}
                 case 40140136:
                     raise OperationalError(errno.EINVAL, resp)
-        elif "msg_code" in resp:
-            match resp["msg_code"]:
+                ##################################################
                 case 50028:
                     raise P115OSError(errno.EFBIG, resp)
                 case 70004:
