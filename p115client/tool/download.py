@@ -10,7 +10,8 @@ __all__ = [
 __doc__ = "这个模块提供了一些和下载有关的函数"
 
 from asyncio import (
-    create_task, to_thread, CancelledError as AsyncCancelledError, 
+    create_task, gather as async_gather, to_thread, 
+    CancelledError as AsyncCancelledError, 
     Queue as AsyncQueue, TaskGroup, 
 )
 from collections import defaultdict
@@ -24,7 +25,10 @@ from datetime import datetime
 from functools import partial
 from itertools import batched, chain, count, cycle, repeat
 from math import inf
-from os import cpu_count, fsdecode, makedirs, remove, rmdir, scandir, DirEntry, PathLike
+from os import (
+    cpu_count, fsdecode, makedirs, remove, rmdir, scandir, 
+    DirEntry, PathLike, 
+)
 from os.path import abspath, dirname, join as joinpath, normpath, splitext
 from queue import SimpleQueue
 from sqlite3 import connect, Connection, Cursor
@@ -51,12 +55,11 @@ from p115client import (
     P115OpenClient, P115URL, 
 )
 from p115client.const import ID_TO_DIRNODE_CACHE
-from p115client.exception import AccessError, P115Warning
+from p115client.exception import P115Warning
 from p115pickcode import to_id
 
 from .iterdir import (
     iterdir, iter_files, iter_files_shortcut, unescape_115_charref, 
-    posix_escape_name, 
 )
 from .util import reduce_image_url_layers
 
@@ -1825,6 +1828,7 @@ def iter_download_files(
         id_to_dirnode = ID_TO_DIRNODE_CACHE[client.user_id]
     elif id_to_dirnode is ...:
         id_to_dirnode = {}
+        path_already = False
     from .iterdir import make_path_binder
     bind = make_path_binder(
         id_to_dirnode, 
@@ -1833,28 +1837,38 @@ def iter_download_files(
         key_of_path="path" if ensure_name else "dirname", 
         key_of_ancestors="ancestors" if ensure_name else "dir_ancestors", 
     )
-    root_ancestors = [{"id": 0, "parent_id": 0, "name": ""}]
-    top_path: str = ""
+    top_id = cid = to_id(cid)
     top_ancestors: list[dict]
-    top_id = to_id(cid)
-    if not top_id:
-        top_path = "/"
-        top_ancestors = root_ancestors
-    def norm_attr(attr: dict, /):
-        nonlocal top_path, top_ancestors
-        bind(attr)
-        if not top_path:
-            top_path = bind.get_path(id_to_dirnode[top_id]) # type: ignore
-            if with_ancestors:
-                top_ancestors = bind.get_ancestors(top_id) # type: ignore
+    top_path: str
+    top_prefix_len: int = 0
+    def update_attr(attr: dict, /):
+        nonlocal top_ancestors, top_path, top_prefix_len
+        if not top_prefix_len:
+            if cid:
+                top_path = bind.get_path(id_to_dirnode[top_id]) # type: ignore
+                if with_ancestors:
+                    top_ancestors = bind.get_ancestors(top_id) # type: ignore
+                top_prefix_len = len(top_path) + 1
+            else:
+                top_ancestors = [{"id": 0, "parent_id": 0, "name": ""}]
+                top_path = "/"
+                top_prefix_len = 1
         attr["top_id"] = top_id
         attr["top_path"] = top_path
         if with_ancestors:
             attr["top_ancestors"] = top_ancestors
+        try:
+            bind(attr)
+            if ensure_name:
+                attr["relpath"] = attr["path"][top_prefix_len:]
+            else:
+                attr["rel_dirname"] = attr["dirname"][top_prefix_len:]
+        except KeyError:
+            pass
         return attr
     if path_already:
         def iter_nonroot(pickcode: str, /):
-            return do_map(norm_attr, iter_download_nodes(
+            return do_map(update_attr, iter_download_nodes(
                 client, 
                 pickcode, 
                 files=True, 
@@ -1866,8 +1880,25 @@ def iter_download_files(
                 **request_kwargs, 
             ))
     else:
+        class BoolRaise:
+            def __init__(self, /, exception):
+                self.exception = exception
+            def __bool__(self, /):
+                raise self.exception
+        path_not_already: bool | BoolRaise = True
+        def set_path_already(fu, /):
+            nonlocal path_not_already
+            if isinstance(fu, BaseException):
+                exc = fu
+            else:
+                exc = fu.exception()
+            if exc is None:
+                path_not_already = False
+            else:
+                path_not_already = BoolRaise(exc)
         def gen_step(pickcode: str, /):
-            ancestors_loaded = False
+            nonlocal path_already
+            path_already = False
             def load_ancestors(pickcode: str, /):
                 return through(iter_download_nodes(
                     client, 
@@ -1880,28 +1911,37 @@ def iter_download_files(
                     async_=async_, 
                     **request_kwargs, 
                 ))
-            def set_ancestors_loaded(fu, /):
-                nonlocal ancestors_loaded
-                exc = fu.exception()
-                if exc is not None:
-                    raise exc
-                ancestors_loaded = True
-            if cid:
-                from .attr import get_ancestors
-                yield get_ancestors(
-                    client, 
-                    cid, 
-                    id_to_dirnode=id_to_dirnode, 
-                    ensure_file=False, 
-                    app=app, 
-                    async_=async_, 
-                    **request_kwargs, 
-                )
             if async_:
                 task: Any = create_task(load_ancestors(pickcode))
             else:
                 task = run_as_thread(load_ancestors, pickcode)
-            task.add_done_callback(set_ancestors_loaded)
+            if cid:
+                from .attr import get_ancestors
+                def update_top():
+                    return (yield get_ancestors(
+                        client, 
+                        cid, 
+                        id_to_dirnode=id_to_dirnode, 
+                        ensure_file=False, 
+                        app=app, 
+                        async_=async_, 
+                        **request_kwargs, 
+                    ))
+                if async_:
+                    task2 = async_gather(run_gen_step(update_top, True), task)
+                    task2.add_done_callback(set_path_already)
+                else:
+                    task0 = run_as_thread(run_gen_step, update_top, False)
+                    def done_callback(fu, /):
+                        try:
+                            task0.result()
+                        except BaseException as e:
+                            set_path_already(e)
+                        else:
+                            set_path_already(fu)
+                    task.add_done_callback(done_callback)
+            else:
+                task.add_done_callback(set_path_already)
             cache: list[dict] = []
             add_to_cache = cache.append
             with with_iter_next(iter_download_nodes(
@@ -1915,21 +1955,20 @@ def iter_download_files(
                 async_=async_, 
                 **request_kwargs, 
             )) as get_next:
+                while path_not_already:
+                    add_to_cache((yield get_next()))
+                if cache:
+                    yield YieldFrom(do_map(update_attr, cache))
+                    cache.clear()
                 while True:
-                    attr = yield get_next()
-                    if ancestors_loaded:
-                        if cache:
-                            yield YieldFrom(do_map(norm_attr, cache))
-                            cache.clear()
-                        yield Yield(norm_attr(attr))
-                    else:
-                        add_to_cache(attr)
+                    yield Yield(update_attr((yield get_next())))
             if cache:
                 if async_:
                     yield task
                 else:
                     task.result()
-                yield YieldFrom(do_map(norm_attr, cache))
+                bool(path_not_already)
+                yield YieldFrom(do_map(update_attr, cache))
         def iter_nonroot(pickcode: str, /):
             return run_gen_step_iter(gen_step(pickcode), async_)
     if cid:
@@ -1956,7 +1995,7 @@ def iter_download_files(
                             "pickcode": attr["pickcode"], 
                             "size": attr["size"], 
                         }
-                        yield Yield(norm_attr(attr))
+                        yield Yield(update_attr(attr))
             for pickcode in pickcodes:
                 yield YieldFrom(iter_nonroot(pickcode))
         return run_gen_step_iter(iter_root, async_)

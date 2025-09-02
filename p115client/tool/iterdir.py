@@ -1497,7 +1497,6 @@ def iter_files_with_path(
         return run_gen_step_iter(gen_step, async_)
 
 
-# TODO: 如果测试 iter_download_files 性能不错，就把这个的实现用那个
 @overload
 def iter_files_with_path_skim(
     client: str | PathLike | P115Client, 
@@ -1570,165 +1569,22 @@ def iter_files_with_path_skim(
 
     :return: 迭代器，返回此目录内的（所有文件）文件信息
     """
-    from .download import iter_download_nodes
-    if isinstance(client, (str, PathLike)):
-        client = P115Client(client, check_for_relogin=True)
-    if isinstance(escape, bool):
-        if escape:
-            from posixpatht import escape
-        else:
-            escape = posix_escape_name
-    escape = cast(None | Callable[[str], str], escape)
-    if id_to_dirnode is None:
-        id_to_dirnode = ID_TO_DIRNODE_CACHE[client.user_id]
-    elif id_to_dirnode is ...:
-        id_to_dirnode = {}
-        path_already = False
-    bind = make_path_binder(id_to_dirnode, escape=escape, with_ancestors=with_ancestors)
-    cid = to_id(cid)
-    top_id: int = cid
-    top_ancestors: list[dict]
-    top_path: str
-    top_prefix_len: int
-    def update_path(attr: dict, /) -> dict:
-        attr["top_id"]        = top_id
-        attr["top_ancestors"] = top_ancestors
-        attr["top_path"]      = top_path
-        try:
-            bind(attr)
-            attr["relpath"] = attr["path"][top_prefix_len:]
-        except KeyError:
-            pass
-        return attr
-    if path_already:
-        top_ancestors = []
-        add_ancestor = top_ancestors.append
-        tid = top_id
-        while tid and tid in id_to_dirnode:
-            name, pid = id_to_dirnode[tid]
-            add_ancestor({"id": tid, "parent_id": pid, "name": name})
-            tid = pid
-        if not tid:
-            add_ancestor({"id": 0, "parent_id": 0, "name": ""})
-        top_ancestors.reverse()
-        if escape is None:
-            top_path = "/".join(a["name"] for a in top_ancestors)
-        else:
-            top_path = "/".join(escape(a["name"]) for a in top_ancestors)
-        top_prefix_len = 1 if top_path == "/" else len(top_path) + 1
-        return do_map(update_path, iter_download_nodes(
-            client, 
-            cid, 
-            files=True, 
-            ensure_name=True, 
-            max_workers=max_workers, 
-            max_page=max_files and -(-max_files // 3000), 
-            app=app, 
-            async_=async_, 
-            **request_kwargs, 
-        ))
-    else:
-        @as_gen_step
-        def update_top(cid: int | str, /):
-            nonlocal top_ancestors, top_path, top_prefix_len
-            if cid:
-                do_next: Callable = anext if async_ else next
-                attr = yield do_next(_iter_fs_files(
-                    client, 
-                    to_id(cid), 
-                    page_size=1, 
-                    id_to_dirnode=id_to_dirnode, 
-                    normalize_attr=None, 
-                    escape=escape, 
-                    app=app, 
-                    async_=async_, 
-                    **request_kwargs, 
-                ), None)
-                if not attr:
-                    return
-                top_ancestors = attr["top_ancestors"]
-                top_path = attr["top_path"]
-                top_prefix_len = 1 if top_path == "/" else len(top_path) + 1
-            else:
-                top_ancestors = [{"id": 0, "parent_id": 0, "name": ""}]
-                top_path = "/"
-                top_prefix_len = 1
-        def fetch_dirs(id: int | str, /):
-            if id:
-                return through(iter_download_nodes(
-                    client, 
-                    client.to_pickcode(id), 
-                    files=False, 
-                    id_to_dirnode=id_to_dirnode, 
-                    max_workers=max_workers, 
-                    max_page=max_dirs and -(-max_dirs // 3000), 
-                    async_=async_, 
-                    **request_kwargs, 
-                ))
-            else:
-                return foreach(
-                    lambda a: fetch_dirs(a["pickcode"]), 
-                    iterdir(
-                        client, 
-                        ensure_file=False, 
-                        id_to_dirnode=id_to_dirnode, 
-                        app=app, 
-                        async_=async_, 
-                        **request_kwargs, 
-                    ), 
-                )
-        class BoolRaise:
-            def __init__(self, /, exception):
-                self.exception = exception
-            def __bool__(self, /):
-                raise self.exception
-        path_not_already: bool | BoolRaise = True
-        def set_path_already(fu, /):
-            nonlocal path_not_already
-            exc = fu.exception()
-            if exc is None:
-                path_not_already = False
-            else:
-                path_not_already = BoolRaise(exc)
-        def gen_step():
-            cache: list[dict] = []
-            add_to_cache = cache.append
-            if async_:
-                task: Any = async_gather(update_top(cid), fetch_dirs(cid))
-                task.add_done_callback(set_path_already)
-            else:
-                task0 = run_as_thread(update_top, cid)
-                task = run_as_thread(fetch_dirs, cid)
-                def done_callback(fu, /):
-                    task0.result()
-                    set_path_already(fu)
-                task.add_done_callback(done_callback)
-            with with_iter_next(iter_download_nodes(
-                client, 
-                cid, 
-                files=True, 
-                ensure_name=True, 
-                max_workers=max_workers, 
-                max_page=max_files and -(-max_files // 3000), 
-                app=app, 
-                async_=async_, 
-                **request_kwargs, 
-            )) as get_next:
-                while path_not_already:
-                    add_to_cache((yield get_next()))
-                if cache:
-                    yield YieldFrom(map(update_path, cache))
-                    cache.clear()
-                while True:
-                    yield Yield(update_path((yield get_next())))
-            if cache:
-                if async_:
-                    yield task
-                else:
-                    task.result()
-                bool(path_not_already)
-                yield YieldFrom(map(update_path, cache))
-        return run_gen_step_iter(gen_step, async_)
+    from .download import iter_download_files
+    return iter_download_files(
+        client, 
+        cid, 
+        ensure_name=True, 
+        escape=escape, 
+        with_ancestors=with_ancestors, 
+        id_to_dirnode=id_to_dirnode, 
+        path_already=path_already, 
+        max_workers=max_workers, 
+        max_files=max_files, 
+        max_dirs=max_dirs, 
+        app=app, 
+        async_=async_, # type: ignore
+        **request_kwargs, 
+    )
 
 
 @overload
@@ -2125,6 +1981,7 @@ def traverse_tree(
     return run_gen_step_iter(gen_step, async_)
 
 
+# TODO: 需要优化到 10 万条 2 秒内
 @overload
 def traverse_tree_with_path(
     client: str | PathLike | P115Client, 
