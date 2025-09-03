@@ -57,6 +57,7 @@ python-startfile = ">=0.0.2"
 python-temporary = ">=0.0.1"
 python-undefined = ">=0.0.3"
 qrcode = "*"
+sqlitetools = ">=0.0.3.2"
 yarl = "*"
 
 [build-system]
