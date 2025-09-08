@@ -17,7 +17,7 @@ from math import inf
 from ntpath import normpath
 from os import PathLike
 from os.path import expanduser
-from sqlite3 import connect, Connection, Cursor
+from sqlite3 import connect, register_adapter, register_converter, Connection, Cursor
 from time import time
 from typing import overload, Any, Literal
 from warnings import warn
@@ -34,10 +34,15 @@ from p115pickcode import to_id
 from posixpatht import path_is_dir_form, escape, splits
 from sqlitetools import execute, find, query, transact, upsert_items, AutoCloseConnection
 
-from .attr import get_ancestors_to_cid
+from .attr import get_ancestors
 from .iterdir import iter_nodes_using_event, traverse_tree
 from .life import iter_life_behavior_list
 from .history import iter_history_list
+
+
+register_adapter(list, dumps)
+register_adapter(dict, dumps)
+register_converter("JSON", loads)
 
 
 def updatedb_initdb(con: Connection | Cursor, /) -> Cursor:
@@ -52,7 +57,7 @@ CREATE TABLE IF NOT EXISTS data (
     id INTEGER NOT NULL PRIMARY KEY,      -- 主键
     parent_id INTEGER NOT NULL DEFAULT 0, -- 上级目录的 id
     name TEXT NOT NULL,                   -- 名字
-    sha1 TEXT NOT NULL DEFAULT '',        -- 文件的 sha1 散列值
+    sha1 TEXT NOT NULL DEFAULT '',        -- 文件的 sha1 哈希值
     size INTEGER NOT NULL DEFAULT 0,      -- 文件大小
     pickcode TEXT NOT NULL DEFAULT '',    -- 提取码，下载等操作时需要用到
     is_dir INTEGER NOT NULL DEFAULT 1 CHECK(is_dir IN (0, 1)), -- 是否目录
@@ -163,6 +168,7 @@ def wrap_async(func, async_: bool = False, /, threaded: bool = False):
 def _init_client(
     client: str | PathLike | P115Client, 
     dbfile: None | str | PathLike | Connection | Cursor = None, 
+    init_sql: None | str = None, 
 ) -> tuple[P115Client, Connection | Cursor]:
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
@@ -184,7 +190,10 @@ def _init_client(
             timeout=inf, 
             uri=isinstance(dbfile, str) and dbfile.startswith("file:"), 
         )
-        updatedb_initdb(con)
+        if init_sql is None:
+            updatedb_initdb(con)
+        elif init_sql:
+            con.executescript(init_sql)
     return client, con
 
 
@@ -277,6 +286,10 @@ def updatedb(
     client: str | PathLike | P115Client, 
     dbfile: None | str | PathLike | Connection | Cursor = None, 
     cid: int | str = 0, 
+    recursive: bool = True, 
+    max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     app: str = "android", 
     *, 
     async_: Literal[False] = False, 
@@ -288,6 +301,10 @@ def updatedb(
     client: str | PathLike | P115Client, 
     dbfile: None | str | PathLike | Connection | Cursor = None, 
     cid: int | str = 0, 
+    recursive: bool = True, 
+    max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     app: str = "android", 
     *, 
     async_: Literal[True], 
@@ -298,16 +315,24 @@ def updatedb(
     client: str | PathLike | P115Client, 
     dbfile: None | str | PathLike | Connection | Cursor = None, 
     cid: int | str = 0, 
+    recursive: bool = True, 
+    max_workers: None | int = None, 
+    max_files: int | None = 0, 
+    max_dirs: int | None = 0, 
     app: str = "android", 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
 ) -> int | Coroutine[Any, Any, int]:
-    """对某个目录执行一次全量拉取，以更新 SQLite 数据
+    """对某个目录执行一次拉取，以更新 SQLite 数据
 
     :param client: 115 网盘客户端对象
     :param dbfile: 数据库文件路径，如果为 None，则自动确定
     :param cid: 目录的 id 或 pickcode
+    :param recursive: 如果为 True，则拉取所有以之为祖先（先驱）节点的节点信息；否则，拉取所有以之为父（前驱）节点的节点信息
+    :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
+    :param max_files: 估计最大存在的文件数，<= 0 时则无限
+    :param max_dirs: 估计最大存在的目录数，<= 0 时则无限
     :param app: 使用指定 app（设备）的接口
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
@@ -318,38 +343,44 @@ def updatedb(
     upsert = wrap_async(upsert_items, async_, threaded=True)
     cid = to_id(cid)
     def gen_step():
-        start_t = int(time())
-        total = 0
-        if cid and not has_id(con, cid):
-            ancestors = yield get_ancestors_to_cid(
-                client, 
-                cid, 
-                id_to_dirnode=..., 
-                app=app, 
-                async_=async_, 
-                **request_kwargs, 
-            )
-            if ancestors:
-                if ancestors[0]["id"] == 0:
-                    ancestors = ancestors[1:]
-                if ancestors:
-                    total += (yield upsert(con, ancestors, {"is_alive": 1}, commit=True)).rowcount
-        with with_iter_next(chunked(
-            traverse_tree(
-                client, 
-                cid, 
-                id_to_dirnode=..., 
-                app=app, 
-                async_=async_, 
-                **request_kwargs, 
-            ), 
-            1000, 
-        )) as get_next:
-            while True:
-                batch = yield get_next()
-                total += (yield upsert(con, batch, {"is_alive": 1}, commit=True)).rowcount
-        if cid:
-            clean_sql = f"""\
+        if recursive:
+            start_t = int(time())
+            try:
+                total = 0
+                if cid and not has_id(con, cid):
+                    ancestors = yield get_ancestors(
+                        client, 
+                        cid, 
+                        id_to_dirnode=..., 
+                        ensure_file=False, 
+                        app=app, 
+                        async_=async_, 
+                        **request_kwargs, 
+                    )
+                    if ancestors:
+                        if ancestors[0]["id"] == 0:
+                            ancestors = ancestors[1:]
+                        if ancestors:
+                            total += (yield upsert(con, ancestors, {"is_alive": 1}, commit=True)).rowcount
+                with with_iter_next(chunked(
+                    traverse_tree(
+                        client, 
+                        cid, 
+                        id_to_dirnode=..., 
+                        max_workers=max_workers, 
+                        max_files=max_files, 
+                        max_dirs=max_dirs, 
+                        app=app, 
+                        async_=async_, 
+                        **request_kwargs, 
+                    ), 
+                    1000, 
+                )) as get_next:
+                    while True:
+                        batch = yield get_next()
+                        total += (yield upsert(con, batch, {"is_alive": 1}, commit=True)).rowcount
+                if cid:
+                    clean_sql = f"""\
 UPDATE data SET is_alive = 0 WHERE id in (
     WITH ids(id) AS (
         SELECT id FROM data WHERE parent_id = {cid} AND is_alive AND updated_at < :start_t
@@ -358,15 +389,36 @@ UPDATE data SET is_alive = 0 WHERE id in (
     )
     SELECT id FROM ids
 );"""
+                else:
+                    clean_sql = "UPDATE data SET is_alive = 0 WHERE is_alive AND updated_at < :start_t"
+                total += (yield wrap_async(execute, async_, threaded=True)(
+                    con, 
+                    clean_sql, 
+                    {"start_t": start_t}, 
+                    commit=True, 
+                )).rowcount
+            except FileNotFoundError:
+                if cid:
+                    clean_sql = f"""\
+UPDATE data SET is_alive = 0 WHERE id in (
+    WITH ids(id) AS (
+        SELECT id FROM data WHERE parent_id = {cid} AND is_alive
+        UNION ALL
+        SELECT data.id FROM ids JOIN data ON (ids.id = data.parent_id) WHERE is_alive
+    )
+    SELECT id FROM ids
+);"""
+                else:
+                    clean_sql = "UPDATE data SET is_alive = 0 WHERE is_alive"
+                total = (yield wrap_async(execute, async_, threaded=True)(
+                    con, 
+                    clean_sql, 
+                    commit=True, 
+                )).rowcount
+            return total
         else:
-            clean_sql = "UPDATE data SET is_alive = 0 WHERE is_alive AND updated_at < :start_t"
-        total += (yield wrap_async(execute, async_, threaded=True)(
-            con, 
-            clean_sql, 
-            {"start_t": start_t}, 
-            commit=True
-        )).rowcount
-        return total
+            # TODO: 拉取一级
+            raise NotImplementedError
     return run_gen_step(gen_step, async_)
 
 
@@ -697,7 +749,7 @@ SELECT id, parent_id, name FROM t;""", id))
 
         :param self: P115QueryDB 实例或者数据库连接或游标
         :param pickcode: 当前节点的提取码，优先级高于 sha1
-        :param sha1: 当前节点的 sha1 校验散列值，优先级高于 path
+        :param sha1: 当前节点的 sha1 校验哈希值，优先级高于 path
         :param path: 当前节点的路径
 
         :return: 当前节点的 id
@@ -778,7 +830,7 @@ SELECT id, parent_id, name FROM t;""", id))
 
         :param self: P115QueryDB 实例或者数据库连接或游标
         :param id: 当前节点的 id，优先级高于 sha1
-        :param sha1: 当前节点的 sha1 校验散列值，优先级高于 path
+        :param sha1: 当前节点的 sha1 校验哈希值，优先级高于 path
         :param path: 当前节点的路径
 
         :return: 当前节点的提取码
@@ -825,7 +877,7 @@ SELECT id, parent_id, name FROM t;""", id))
         :param pickcode: 当前节点的提取码，优先级高于 path
         :param path: 当前节点的路径
 
-        :return: 当前节点的 sha1 校验散列值
+        :return: 当前节点的 sha1 校验哈希值
         """
         con: Any
         if isinstance(self, P115QueryDB):

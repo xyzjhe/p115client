@@ -296,9 +296,8 @@ def make_application(
                 raise
             receive_code = await get_receive_code(share_code)
             return await get_share_downurl(id, share_code, receive_code, app=app)
-        if "&c=0&f=&" in url:
-            expire_ts = int(next(v for k, v in parse_qsl(urlsplit(url).query) if k == "t")) - 60 * 5
-            DOWNLOAD_URL_CACHE1[(share_code, id)] = (expire_ts, url)
+        expire_ts = int(next(v for k, v in parse_qsl(urlsplit(url).query) if k == "t")) - 60 * 5
+        DOWNLOAD_URL_CACHE1[(share_code, id)] = (expire_ts, url)
         return url
 
     async def get_receive_code(share_code: str) -> str:
@@ -334,10 +333,10 @@ def make_application(
         t: int = 0, 
     ):
         def check_sign(val, /):
-            if value:
-                val = value
             if not token:
                 return None
+            if value:
+                val = value
             if sign != calc_sha1(bytes(f"302@115-{token}-{t}-{val}", "utf-8")).hexdigest():
                 return json({"state": False, "message": "invalid sign"}, 403)
             elif t > 0 and t <= get_timestamp():
@@ -531,3 +530,5 @@ if __name__ == "__main__":
     )
 
 # TODO: 功能需要和 p115nano302 和 p115open302 追平，并支持读写 cookies，支持多用户的 cookies 等
+# TODO: 增加参数 parent_id
+# TODO: 支持更换 cookies 以及更新 cookies

@@ -862,19 +862,21 @@ def iter_subtitle_batches(
     return run_gen_step_iter(gen_step, async_)
 
 
+# TODO: 实现 p115updatedb 的逻辑，但多了一个 user_id 字段
+# TODO: 分成 2 部分拉取（并发），1. 拉取目录 iter_dirs 2. 拉取文件 iter_files+normalize_attr_simple
+# TODO: 支持增量更新，根据 mtime 逆序排列进行比对
+# TODO: 允许只拉取 1 级
+# TODO: 这个函数可以作为 p115dav 的基础
+# TODO: 首先判断数据库里面有没有这个id（存活），如果没有就直接并发拉，如果有则序列拉（随时终止）
+# TODO: 不需要 event 表？
 @overload
 def make_db(
     client: str | PathLike | P115Client, 
+    dbfile: str | PathLike | Connection | Cursor = "p115updatedb.db", 
     cid: int | str = 0, 
-    dbfile: str | PathLike | Connection | Cursor = "115-file-tree.db", 
-    clean: bool = True, 
-    replace: bool = True, 
-    with_path: bool = True, 
-    with_event: bool = False, 
-    batch_size: int = 3_000, 
-    id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
-    app: str = "android", 
+    recursive: bool = True, 
     max_workers: None | int = None, 
+    app: str = "android", 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -883,16 +885,11 @@ def make_db(
 @overload
 def make_db(
     client: str | PathLike | P115Client, 
+    dbfile: str | PathLike | Connection | Cursor = "p115updatedb.db", 
     cid: int | str = 0, 
-    dbfile: str | PathLike | Connection | Cursor = "115-file-tree.db", 
-    clean: bool = True, 
-    replace: bool = True, 
-    with_path: bool = True, 
-    with_event: bool = False, 
-    batch_size: int = 3_000, 
-    id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
-    app: str = "android", 
+    recursive: bool = True, 
     max_workers: None | int = None, 
+    app: str = "android", 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -900,106 +897,57 @@ def make_db(
     ...
 def make_db(
     client: str | PathLike | P115Client, 
+    dbfile: str | PathLike | Connection | Cursor = "p115updatedb.db", 
     cid: int | str = 0, 
-    dbfile: str | PathLike | Connection | Cursor = "115-file-tree.db", 
-    clean: bool = True, 
-    replace: bool = True, 
-    with_path: bool = True, 
-    with_event: bool = False, 
-    batch_size: int = 3_000, 
-    id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = None, 
-    app: str = "android", 
+    recursive: bool = True, 
     max_workers: None | int = None, 
+    app: str = "android", 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
 ) -> dict | Coroutine[Any, Any, dict]:
-    """拉取目录树，保存到数据库
+    """对某个目录执行一次拉取，以更新 SQLite 数据
 
     :param client: 115 客户端或 cookies
-    :param cid: 目录 id 或 pickcode
     :param dbfile: 数据库路径或连接
-    :param clean: 是否清理旧数据
-    :param replace: 遇到相同 id 时是否替换数据
-    :param with_path: 拉取数据时是否需要 "path" 字段
-    :param with_event: 是否收集和文件系统变更（文件的增删改）有关的事件，数据保存在 ``event`` 表中
-    :param batch_size: 每批写入数据库的最多条数
-    :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
+    :param cid: 目录 id 或 pickcode
+    :param recursive: 如果为 True，则拉取所有以之为祖先（先驱）节点的节点信息；否则，拉取所有以之为父（前驱）节点的节点信息
+    :param max_workers: 最大并发数，如果为 None 或 <= 0，则自动确定
     :param app: 使用指定 app（设备）的接口
-    :param max_workers: 最大并发数，用户拉取目录树，但写入数据库仍然是单线程的（经过测试如此效率更高）
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
 
     :return: 一些统计信息
     """
-    if isinstance(client, (str, PathLike)):
-        client = P115Client(client, check_for_relogin=True)
+    from .updatedb import _init_client
     init_sql = """\
 -- 修改日志模式为 WAL (write-ahead-log)
 PRAGMA journal_mode = WAL;
 
 -- 创建表
 CREATE TABLE IF NOT EXISTS data (
-    id INTEGER NOT NULL PRIMARY KEY,   -- id
-    parent_id INTEGER NOT NULL ,       -- 所在的目录 id
-    user_id INTEGER NOT NULL,          -- 用户 id
-    name TEXT NOT NULL,                -- 名字
-    sha1 TEXT NOT NULL DEFAULT '',     -- 文件的 sha1 散列值
-    size INTEGER NOT NULL DEFAULT 0,   -- 文件大小
-    pickcode TEXT NOT NULL DEFAULT '', -- 提取码
-    is_dir INTEGER NOT NULL DEFAULT 0, -- 是否目录
-    path TEXT NOT NULL DEFAULT '',     -- 路径
-    top_id INTEGER NOT NULL DEFAULT 0, -- 最近一次拉取时顶层目录的 id
-    extra BLOB DEFAULT NULL,           -- 其它信息
-    created_at TIMESTAMP DEFAULT (STRFTIME('%s', 'now')), -- 创建时间
-    updated_at TIMESTAMP DEFAULT (STRFTIME('%s', 'now')) -- 更新时间
+    id INTEGER NOT NULL PRIMARY KEY,      -- id
+    parent_id INTEGER NOT NULL DEFAULT 0, -- 上级目录 id
+    name TEXT NOT NULL DEFAULT '',        -- 名字
+    sha1 TEXT NOT NULL DEFAULT '',        -- 文件的 sha1 哈希值
+    size INTEGER NOT NULL DEFAULT 0,      -- 文件大小
+    pickcode TEXT NOT NULL DEFAULT '',    -- 提取码
+    ctime INTEGER NOT NULL DEFAULT 0,     -- 创建时间戳
+    mtime INTEGER NOT NULL DEFAULT 0,     -- 更新时间戳
+    is_dir INTEGER NOT NULL DEFAULT 0,    -- 是否目录
+    type INTEGER NOT NULL DEFAULT 0,      -- 文件类型，目录 <=> type=0
+    user_id INTEGER NOT NULL,             -- 用户 id
+    extra BLOB DEFAULT NULL,              -- 其它信息
+    is_alive INTEGER NOT NULL DEFAULT 1 CHECK(is_alive IN (0, 1)), -- 是否存活（存活即是不是删除状态）
+    created_at TIMESTAMP DEFAULT (unixepoch('subsec')), -- 创建时间
+    updated_at TIMESTAMP DEFAULT (unixepoch('subsec'))  -- 更新时间
 );
 
--- 创建索引（一些索引需要时候自己加）
+-- 创建索引
 CREATE INDEX IF NOT EXISTS idx_data_pid ON data(parent_id);
 CREATE INDEX IF NOT EXISTS idx_data_tid ON data(top_id);
+CREATE INDEX IF NOT EXISTS idx_data_mtime ON data(mtime);
 CREATE INDEX IF NOT EXISTS idx_data_utime ON data(updated_at);
--- CREATE INDEX IF NOT EXISTS idx_data_sha1_size ON data(sha1, size);
--- CREATE INDEX IF NOT EXISTS idx_data_uid ON data(user_id);
--- CREATE INDEX IF NOT EXISTS idx_data_name ON data(name);
--- CREATE INDEX IF NOT EXISTS idx_data_path ON data(path);
-"""
-    if with_event:
-        init_sql += """
--- event 表，只用于记录 data 表中与文件系统有关的增删改事件
-CREATE TABLE IF NOT EXISTS event (
-    _id INTEGER PRIMARY KEY AUTOINCREMENT, -- 主键
-    id INTEGER NOT NULL,               -- id
-    is_dir INTEGER NOT NULL DEFAULT 0, -- 是否目录
-    pid0 INTEGER NOT NULL DEFAULT -1,  -- 更新前的父目录 id
-    pid1 INTEGER NOT NULL DEFAULT -1,  -- 更新后的父目录 id
-    name0 TEXT NOT NULL DEFAULT "",    -- 更新前的名字
-    name1 TEXT NOT NULL DEFAULT "",    -- 更新后的名字
-    path0 TEXT NOT NULL DEFAULT "",    -- 更新前的路径
-    path1 TEXT NOT NULL DEFAULT "",    -- 更新后的路径
-    event TEXT NOT NULL DEFAULT "",    -- 事件名
-    created_at DATETIME DEFAULT (STRFTIME('%s', 'now')) -- 创建时间
-);
-
--- data 表发生新增
-DROP TRIGGER IF EXISTS trg_data_insert;
-CREATE TRIGGER trg_data_insert
-AFTER INSERT ON data
-FOR EACH ROW
-BEGIN
-    INSERT INTO event(id, is_dir, pid1, name1, path1, event) 
-    VALUES (NEW.id, NEW.is_dir, NEW.parent_id, NEW.name, NEW.path, 'add');
-END;
-
--- data 表发生删除
-DROP TRIGGER IF EXISTS trg_data_delete;
-CREATE TRIGGER trg_data_delete
-AFTER DELETE ON data
-FOR EACH ROW
-BEGIN
-    INSERT INTO event(id, is_dir, pid0, name0, path0, event) 
-    VALUES (OLD.id, OLD.is_dir, OLD.parent_id, OLD.name, OLD.path, 'remove');
-END;
 
 -- data 表发生更新
 DROP TRIGGER IF EXISTS trg_data_update;
@@ -1007,139 +955,14 @@ CREATE TRIGGER trg_data_update
 AFTER UPDATE ON data
 FOR EACH ROW
 BEGIN
-    UPDATE data SET updated_at = STRFTIME('%s', 'now') WHERE id = NEW.id;
-    INSERT INTO event(id, is_dir, pid0, pid1, name0, name1, path0, path1, event)
-    SELECT
-        OLD.id, OLD.is_dir, OLD.parent_id, NEW.parent_id, OLD.name, NEW.name, OLD.path, NEW.path, 
-        CASE WHEN OLD.parent_id != NEW.parent_id THEN 
-            CASE WHEN OLD.name != NEW.name THEN 'move,rename' ELSE 'move' END
-        ELSE 'rename' END
-    WHERE
-        OLD.parent_id != NEW.parent_id OR OLD.name != NEW.name;
+    UPDATE data SET updated_at = unixepoch('subsec') WHERE id = NEW.id;
 END;"""
-    else:
-        init_sql += """
-DROP TRIGGER IF EXISTS trg_data_insert;
-DROP TRIGGER IF EXISTS trg_data_delete;
-
--- data 表发生更新
-DROP TRIGGER IF EXISTS trg_data_update;
-CREATE TRIGGER trg_data_update
-AFTER UPDATE ON data
-FOR EACH ROW
-BEGIN
-    UPDATE data SET updated_at = STRFTIME('%s', 'now') WHERE id = NEW.id;
-END;"""
-    clean_sql = """\
-DELETE FROM data WHERE id in (
-    WITH ids(id) AS (
-        SELECT id FROM data WHERE parent_id = :top_id AND updated_at < :start_t
-        UNION ALL
-        SELECT data.id FROM ids JOIN data ON (ids.id = data.parent_id) WHERE updated_at < :start_t
-    )
-    SELECT id FROM ids
-    UNION ALL
-    SELECT id FROM data WHERE top_id = :top_id AND updated_at < :start_t
-);"""
-    cid = to_id(cid)
-    user_id = client.user_id
-    def write_records(cur: Cursor, records: tuple[dict], /):
-        if replace:
-            if with_path:
-                sql = """\
-INSERT OR REPLACE INTO data (id, parent_id, user_id, name, sha1, size, pickcode, is_dir, top_id, path)
-VALUES (:id, :parent_id, :user_id, :name, :sha1, :size, :pickcode, :is_dir, :top_id, :path);"""
-            else:
-                sql = """\
-INSERT OR REPLACE INTO data (id, parent_id, user_id, name, sha1, size, pickcode, is_dir, top_id)
-VALUES (:id, :parent_id, :user_id, :name, :sha1, :size, :pickcode, :is_dir, :top_id);"""
-        elif with_path:
-            sql = """\
-INSERT INTO data (id, parent_id, user_id, name, sha1, size, pickcode, is_dir, top_id, path)
-VALUES (:id, :parent_id, :user_id, :name, :sha1, :size, :pickcode, :is_dir, :top_id, :path)
-ON CONFLICT(id) DO UPDATE SET id = excluded.id;"""
-        else:
-            sql = """\
-INSERT INTO data (id, parent_id, user_id, name, sha1, size, pickcode, is_dir, top_id)
-VALUES (:id, :parent_id, :user_id, :name, :sha1, :size, :pickcode, :is_dir, :top_id)
-ON CONFLICT (id) DO UPDATE SET id = excluded.id;"""
-        for record in records:
-            record["user_id"] = user_id
-            record["top_id"] = cid
-        cur.executemany(sql, records)
-    traverse_tree: Callable
-    if with_path:
-        from .iterdir import traverse_tree_with_path as traverse_tree
-    else:
-        from .iterdir import traverse_tree
-    def gen_step():
-        if isinstance(dbfile, (Connection, Cursor)):
-            will_close = False
-            con = dbfile
-            if isinstance(con, Cursor):
-                cur = con
-                con = con.connection
-        else:
-            will_close = True
-            con = connect(
-                dbfile, 
-                uri=isinstance(dbfile, str) and dbfile.startswith("file:"), 
-                check_same_thread=False, 
-                timeout=inf, 
-            )
-            cur = con.cursor()
-        nupsert = 0
-        nremove = 0
-        try:
-            cur.executescript(init_sql)
-            start_t = time()
-            with with_iter_next(chunked(traverse_tree(
-                client, 
-                cid, 
-                id_to_dirnode=id_to_dirnode, 
-                app=app, 
-                max_workers=max_workers, 
-                async_=async_, 
-                **request_kwargs, 
-            ), batch_size)) as get_next:
-                while True:
-                    records = yield get_next()
-                    if async_:
-                        yield to_thread(write_records, cur, records)
-                    else:
-                        write_records(cur, records)
-                    nupsert += len(records)
-            if clean:
-                clean_start_t = time()
-                cur.execute(clean_sql, {"top_id": cid, "start_t": int(start_t)})
-                nremove = cur.rowcount
-            if async_:
-                yield to_thread(con.commit)
-            else:
-                con.commit()
-        except:
-            con.rollback()
-            raise
-        finally:
-            if will_close:
-                con.close()
-        stop_t = time()
-        result = {
-            "total": nupsert + nremove, 
-            "count_upsert": nupsert, 
-            "count_remove": nremove, 
-            "start_time": start_t, 
-            "start_time_str": str(datetime.fromtimestamp(start_t)), 
-            "stop_time": stop_t, 
-            "stop_time_str": str(datetime.fromtimestamp(stop_t)), 
-            "elapsed_seconds": stop_t - start_t, 
-        }
-        if clean:
-            result["elapsed_seconds_of_cleaning"] = stop_t - clean_start_t
-        return result
-    return run_gen_step(gen_step, async_)
+    client, con = _init_client(client, dbfile, init_sql)
+    raise NotImplementedError
 
 
+# TODO: 支持只拉取 1 级
+# TODO: 需要更多的简化
 @overload
 def make_strm(
     client: str | PathLike | P115Client, 
@@ -1440,6 +1263,7 @@ def make_strm(
     return run_gen_step(gen_step, async_)
 
 
+# TODO: 如果拉取 max_page 时发现，还存在下一页，则依然需要继续拉取
 @overload
 def iter_download_nodes(
     client: str | PathLike | P115Client, 

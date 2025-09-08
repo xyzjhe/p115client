@@ -195,10 +195,10 @@ def make_application(
         t: int = 0, 
     ):
         def check_sign(val, /):
-            if value:
-                val = value
             if not token:
                 return None
+            if value:
+                val = value
             if sign != calc_sha1(bytes(f"302@115-{token}-{t}-{val}", "utf-8")).hexdigest():
                 return json({"state": False, "message": "invalid sign"}, 403)
             elif t > 0 and t <= get_timestamp():
@@ -339,3 +339,4 @@ if __name__ == "__main__":
     )
 
 # TODO: 需要更新，以追平 p115tiny302，但有些功能可以没有，这个模块必须足够简单
+# TODO: 增加参数 parent_id

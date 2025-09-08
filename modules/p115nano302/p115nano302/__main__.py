@@ -11,17 +11,16 @@ __doc__ = """\
     │                                                                              │
     │                      \x1b[32mlicense     \x1b[4;34mhttps://www.gnu.org/licenses/gpl-3.0.txt\x1b[0m    │
     │                                                                              │
-    │                      \x1b[32mversion     \x1b[1;36m0.1.1\x1b[0m                                       │
+    │                      \x1b[32mversion     \x1b[1;36m0.1.2\x1b[0m                                       │
     │                                                                              │
     ╰──────────────────────────────────────────────────────────────────────────────╯
 
-> 网盘文件支持用 \x1b[3;36mpickcode\x1b[0m、\x1b[3;36mid\x1b[0m、\x1b[3;36msha1\x1b[0m、\x1b[3;36mname\x1b[0m 或 \x1b[3;36mpath\x1b[0m 查询
-> 指定 \x1b[3;36mis_path=1\x1b[0m 或 \x1b[3;36mis_path=true\x1b[0m 即可启用 \x1b[3;36mpath\x1b[0m 查询，会以 \x1b[1m\\\x1b[0m 作为路径分隔符
+> 网盘文件支持用 \x1b[3;36mid\x1b[0m、\x1b[3;36mpickcode\x1b[0m、\x1b[3;36msha1\x1b[0m 或 \x1b[3;36mname\x1b[0m 查询（\x1b[1;31m照此优先级\x1b[0m），但不支持 \x1b[3;36mpath\x1b[0m 
 > 分享文件支持用 \x1b[3;36mid\x1b[0m 或 \x1b[3;36mname\x1b[0m 查询
+> 用 \x1b[3;36msha1\x1b[0m 或 \x1b[3;36mname\x1b[0m 查询时，可以指定参数 \x1b[3;36mcid\x1b[0m，作为查询目标的顶层目录
 
 < 支持参数 \x1b[3;36muser_id\x1b[0m，以指定用户 id，并在实际执行时使用此用户的 cookies 和网盘数据（\x1b[1;31m未指定时，使用所传入的第 1 个 cookies\x1b[0m）
 < 支持参数 \x1b[3;36mrefresh\x1b[0m，指定 bool 值，用于搜索名字时忽略缓存（\x1b[1;31m强制刷新\x1b[0m）
-< 支持参数 \x1b[3;36mis_path\x1b[0m，指定 bool 值，要求搜索路径而不是名字（\x1b[1;31m仅限你自己的网盘文件，对于分享链接无效\x1b[0m）
 < 支持参数 \x1b[3;36mapp\x1b[0m，用于指定从此设备的接口获取下载链接（\x1b[1;31m可以不管\x1b[0m）
 
 ⏰ 此版本不依赖于 \x1b[31mp115client\x1b[0m 和 \x1b[31mpycryptodome\x1b[0m，至少要求 \x1b[31mpython \x1b[1m3.12\x1b[0m
@@ -33,12 +32,15 @@ __doc__ = """\
 
     \x1b[3;34mhashlib\x1b[0m.\x1b[3;31msha1\x1b[0m(\x1b[3;31mbytes\x1b[0m(f\x1b[32m"302@115-{\x1b[1;3;36mtoken\x1b[0m\x1b[32m}-{\x1b[1;3;36mt\x1b[0m\x1b[32m}-{\x1b[1;3;36mvalue\x1b[0m\x1b[32m}"\x1b[0m, \x1b[32m"utf-8"\x1b[0m)).\x1b[3;31mhexdigest\x1b[0m()
 
-其中
-- \x1b[3;36mtoken\x1b[0m 就是命令行所传入的令牌
-- \x1b[3;36mt\x1b[0m 为过期时间点（默认值为 0，即永不过期）
-- \x1b[3;36mvalue\x1b[0m 就是值，像这样的链接，优先级顺序为 \x1b[3;36mpickcode\x1b[0m > \x1b[3;36mid\x1b[0m > \x1b[3;36msha1\x1b[0m > \x1b[3;36mname\x1b[0m > \x1b[3;36mname2\x1b[0m
+其中：
 
-    \x1b[4;34mhttp://localhost:8000/{\x1b[1;3;36mname2\x1b[0m\x1b[4;34m}?id={\x1b[1;3;36mid\x1b[0m\x1b[4;34m}&name={\x1b[1;3;36mname\x1b[0m\x1b[4;34m}&sha1={\x1b[1;3;36msha1\x1b[0m\x1b[4;34m}&pickcode={\x1b[1;3;36mpickcode\x1b[0m\x1b[4;34m}\x1b[0m
+    1. \x1b[3;36mtoken\x1b[0m 就是命令行所传入的令牌
+    2. \x1b[3;36mt\x1b[0m 为过期时间点（\x1b[1;3;31m默认值为 0，即永不过期\x1b[0m）
+    3. \x1b[3;36mvalue\x1b[0m 就是值，像这样的链接，优先级顺序为 \x1b[3;36mid\x1b[0m > \x1b[3;36mpickcode\x1b[0m > \x1b[3;36msha1\x1b[0m > \x1b[3;36mname\x1b[0m > \x1b[3;36mpath\x1b[0m > \x1b[3;36mname2\x1b[0m
+
+        \x1b[4;34mhttp://localhost:8000/{\x1b[1;3;36mname2\x1b[0m\x1b[4;34m}?id={\x1b[1;3;36mid\x1b[0m\x1b[4;34m}&pickcode={\x1b[1;3;36mpickcode\x1b[0m\x1b[4;34m}&sha1={\x1b[1;3;36msha1\x1b[0m\x1b[4;34m}&name={\x1b[1;3;36mname\x1b[0m\x1b[4;34m}&path={\x1b[1;3;36mpath\x1b[0m\x1b[4;34m}\x1b[0m
+
+    4. 但如果你传入了查询参数 \x1b[3;36mvalue\x1b[0m，且不是空字符串，那么就强制用这个值来计算签名，优先级高于上一条规则
 
 🌰 更新 cookies
 
@@ -46,9 +48,12 @@ __doc__ = """\
 
     \x1b[1mPOST\x1b[0m \x1b[4;34mhttp://localhost:8000/<cookies?password={\x1b[1;3;36mpassword\x1b[0m\x1b[4;34m}\x1b[0m
 
-请求体为 json 数据
+请求体为 json 数据，支持 4 种格式
 
-    \x1b[3;35m{"cookies": "一行写一个 cookies"}\x1b[0m
+    1. \x1b[3;35m{"cookies": "字符串，一行写一个 cookies，用 \\n 分隔"}\x1b[0m
+    2. \x1b[3;35m{"cookies": ["cookies 列表"]}\x1b[0m
+    3. \x1b[3;35m"字符串，一行写一个 cookies，用 \\n 分隔"}\x1b[0m
+    4. \x1b[3;35m["cookies 列表"]\x1b[0m
 
 如果要查询目前所有的 cookies，使用接口（请求时需携带和命令行传入的相同的密码）
 
@@ -56,53 +61,45 @@ __doc__ = """\
 
 🌰 查询示例：
 
-    0. 查询 \x1b[3;36mpickcode\x1b[0m
-        \x1b[4;34mhttp://localhost:8000?ecjq9ichcb40lzlvx\x1b[0m
-        \x1b[4;34mhttp://localhost:8000/ecjq9ichcb40lzlvx\x1b[0m
-        \x1b[4;34mhttp://localhost:8000?pickcode=ecjq9ichcb40lzlvx\x1b[0m
-    1. 带（任意）名字查询 \x1b[3;36mpickcode\x1b[0m
-        \x1b[4;34mhttp://localhost:8000/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv?ecjq9ichcb40lzlvx\x1b[0m
-        \x1b[4;34mhttp://localhost:8000/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv?pickcode=ecjq9ichcb40lzlvx\x1b[0m
-        \x1b[4;34mhttp://localhost:8000/ecjq9ichcb40lzlvx/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv\x1b[0m
-    2. 查询 \x1b[3;36mid\x1b[0m
+    1. 查询 \x1b[3;36mid\x1b[0m
         \x1b[4;34mhttp://localhost:8000?2691590992858971545\x1b[0m
         \x1b[4;34mhttp://localhost:8000/2691590992858971545\x1b[0m
         \x1b[4;34mhttp://localhost:8000?id=2691590992858971545\x1b[0m
-    3. 带（任意）名字查询 \x1b[3;36mid\x1b[0m
+    2. 带（任意）名字查询 \x1b[3;36mid\x1b[0m
         \x1b[4;34mhttp://localhost:8000/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv?2691590992858971545\x1b[0m
         \x1b[4;34mhttp://localhost:8000/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv?id=2691590992858971545\x1b[0m
         \x1b[4;34mhttp://localhost:8000/2691590992858971545/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv\x1b[0m
-    4. 查询 \x1b[3;36msha1\x1b[0m
+    3. 查询 \x1b[3;36mpickcode\x1b[0m
+        \x1b[4;34mhttp://localhost:8000?ecjq9ichcb40lzlvx\x1b[0m
+        \x1b[4;34mhttp://localhost:8000/ecjq9ichcb40lzlvx\x1b[0m
+        \x1b[4;34mhttp://localhost:8000?pickcode=ecjq9ichcb40lzlvx\x1b[0m
+    4. 带（任意）名字查询 \x1b[3;36mpickcode\x1b[0m
+        \x1b[4;34mhttp://localhost:8000/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv?ecjq9ichcb40lzlvx\x1b[0m
+        \x1b[4;34mhttp://localhost:8000/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv?pickcode=ecjq9ichcb40lzlvx\x1b[0m
+        \x1b[4;34mhttp://localhost:8000/ecjq9ichcb40lzlvx/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv\x1b[0m
+    5. 查询 \x1b[3;36msha1\x1b[0m
         \x1b[4;34mhttp://localhost:8000?E7FAA0BE343AF2DA8915F2B694295C8E4C91E691\x1b[0m
         \x1b[4;34mhttp://localhost:8000/E7FAA0BE343AF2DA8915F2B694295C8E4C91E691\x1b[0m
         \x1b[4;34mhttp://localhost:8000?sha1=E7FAA0BE343AF2DA8915F2B694295C8E4C91E691\x1b[0m
-    5. 带（任意）名字查询 \x1b[3;36msha1\x1b[0m
+    6. 带（任意）名字查询 \x1b[3;36msha1\x1b[0m
         \x1b[4;34mhttp://localhost:8000/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv?E7FAA0BE343AF2DA8915F2B694295C8E4C91E691\x1b[0m
         \x1b[4;34mhttp://localhost:8000/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv?sha1=E7FAA0BE343AF2DA8915F2B694295C8E4C91E691\x1b[0m
         \x1b[4;34mhttp://localhost:8000/E7FAA0BE343AF2DA8915F2B694295C8E4C91E691/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv\x1b[0m
-    6. 查询 \x1b[3;36mname\x1b[0m（直接以路径作为 \x1b[3;36mname\x1b[0m，且不要有 \x1b[3;36mpickcode\x1b[0m、\x1b[3;36mid\x1b[0m、\x1b[3;36msha1\x1b[0m 或 \x1b[3;36mname\x1b[0m）
+    7. 查询 \x1b[3;36mname\x1b[0m（直接以路径作为 \x1b[3;36mname\x1b[0m，且不要有 \x1b[3;36mpickcode\x1b[0m、\x1b[3;36mid\x1b[0m、\x1b[3;36msha1\x1b[0m 或 \x1b[3;36mname\x1b[0m）
         \x1b[4;34mhttp://localhost:8000/Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv\x1b[0m
         \x1b[4;34mhttp://localhost:8000?Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv\x1b[0m
         \x1b[4;34mhttp://localhost:8000?name=Novembre.2022.FRENCH.2160p.BluRay.DV.HEVC.DTS-HD.MA.5.1.mkv\x1b[0m
-    7. 查询分享文件（如果是你自己的分享，则无须提供密码 \x1b[3;36mreceive_code\x1b[0m）
+    8. 用 \x1b[3;36mid\x1b[0m 查询分享文件（如果是你自己的分享，则无须提供密码 \x1b[3;36mreceive_code\x1b[0m）
         \x1b[4;34mhttp://localhost:8000?share_code=sw68md23w8m&receive_code=q353&id=2580033742990999218\x1b[0m
         \x1b[4;34mhttp://localhost:8000?share_code=sw68md23w8m&id=2580033742990999218\x1b[0m
-    8. 带（任意）名字查询分享文件（如果是你自己的分享，则无须提供密码 \x1b[3;36mreceive_code\x1b[0m）
+    9. 用 \x1b[3;36mid\x1b[0m 带（任意）名字查询分享文件（如果是你自己的分享，则无须提供密码 \x1b[3;36mreceive_code\x1b[0m）
         \x1b[4;34mhttp://localhost:8000/Cosmos.S01E01.1080p.AMZN.WEB-DL.DD+5.1.H.264-iKA.mkv?share_code=sw68md23w8m&receive_code=q353&id=2580033742990999218\x1b[0m
         \x1b[4;34mhttp://localhost:8000/Cosmos.S01E01.1080p.AMZN.WEB-DL.DD+5.1.H.264-iKA.mkv?share_code=sw68md23w8m&id=2580033742990999218\x1b[0m
-    9. 用 \x1b[3;36mname\x1b[0m 查询分享文件（直接以路径作为 \x1b[3;36mname\x1b[0m，且不要有 \x1b[3;36mid\x1b[0m 查询参数。如果是你自己的分享，则无须提供密码 \x1b[3;36mreceive_code\x1b[0m）
+    10. 用 \x1b[3;36mname\x1b[0m 查询分享文件（直接以路径作为 \x1b[3;36mname\x1b[0m，且不要有 \x1b[3;36mid\x1b[0m 查询参数。如果是你自己的分享，则无须提供密码 \x1b[3;36mreceive_code\x1b[0m）
         \x1b[4;34mhttp://localhost:8000/Cosmos.S01E01.1080p.AMZN.WEB-DL.DD+5.1.H.264-iKA.mkv?share_code=sw68md23w8m&receive_code=q353\x1b[0m
         \x1b[4;34mhttp://localhost:8000/Cosmos.S01E01.1080p.AMZN.WEB-DL.DD+5.1.H.264-iKA.mkv?share_code=sw68md23w8m\x1b[0m
         \x1b[4;34mhttp://localhost:8000?name=Cosmos.S01E01.1080p.AMZN.WEB-DL.DD%2B5.1.H.264-iKA.mkv&share_code=sw68md23w8m&receive_code=q353\x1b[0m
         \x1b[4;34mhttp://localhost:8000?name=Cosmos.S01E01.1080p.AMZN.WEB-DL.DD%2B5.1.H.264-iKA.mkv&share_code=sw68md23w8m\x1b[0m
-   10. 用 \x1b[3;36mpath\x1b[0m 查询网盘中的文件（限制同第 6 条，但需要指定 \x1b[3;36mis_path\x1b[0m）
-        \x1b[4;34mhttp://localhost:8000/a/b/c/movie.mkv?is_path=1\x1b[0m
-        \x1b[4;34mhttp://localhost:8000?/a/b/c/movie.mkv&is_path=1\x1b[0m
-        \x1b[4;34mhttp://localhost:8000?name=/a/b/c/movie.mkv&is_path=1\x1b[0m
-
-再推荐一个命令行使用，用于执行 HTTP 请求的工具，类似 \x1b[1;3mwget\x1b[0m
-
-    \x1b[4m\x1b[34mhttps://pypi.org/project/httpie/\x1b[0m
 """
 
 from argparse import ArgumentParser, Namespace, RawTextHelpFormatter

@@ -6,12 +6,12 @@ PRAGMA recursive_triggers = ON;
 
 -- data 表，用来保存数据
 CREATE TABLE IF NOT EXISTS data (
-    id INTEGER NOT NULL PRIMARY KEY,   -- 文件或目录的 id
-    parent_id INTEGER NOT NULL,        -- 上级目录的 id
+    id INTEGER NOT NULL PRIMARY KEY,   -- id
+    parent_id INTEGER NOT NULL,        -- 上级目录 id
     name TEXT NOT NULL,                -- 名字
     sha1 TEXT NOT NULL DEFAULT '',     -- 文件的 sha1 散列值
     size INTEGER NOT NULL DEFAULT 0,   -- 文件大小
-    pickcode TEXT NOT NULL DEFAULT '', -- 提取码，下载时需要用到
+    pickcode TEXT NOT NULL DEFAULT '', -- 提取码
     type INTEGER NOT NULL DEFAULT 0,   -- 文件类型，目录的 type 总是 0
     ctime INTEGER NOT NULL DEFAULT 0,  -- 创建时间戳，一旦设置就不会更新
     mtime INTEGER NOT NULL DEFAULT 0,  -- 更新时间戳，如果名字、备注被设置（即使值没变），或者（如果自己是目录）进出回收站或增删直接子节点或设置封面，会更新此值，但移动并不更新

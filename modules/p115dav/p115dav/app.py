@@ -2120,6 +2120,7 @@ if __name__ == "__main__":
         with suppress(OSError):
             remove("p115dav-test.db-wal")
 
+# TODO: 读取时，使用 uri，mode=ro
 # TODO: 支持自定义挂载分享链接（可以取名字以及目录结构，通过子应用挂载到特定路径下，但也可以直接由 share_code 获取）
 # TODO: IMAGE_URL_CACHE 用 id 作key，各种都用 id 作 key
 
