@@ -5,13 +5,16 @@ __author__ = "ChenyangGao <https://chenyanggao.github.io>"
 __all__ = [
     "posix_escape_name", "reduce_image_url_layers", "share_extract_payload", 
     "unescape_115_charref", "determine_part_size", "to_cdn_url", 
+    "is_valid_id", "is_valid_sha1", "is_valid_name", "is_valid_pickcode", 
 ]
 __doc__ = "这个模块提供了一些工具函数"
 
 from re import compile as re_compile
+from string import digits, hexdigits
 from typing import cast, Final, NotRequired, TypedDict
 from urllib.parse import parse_qsl, urlsplit
 
+from p115pickcode import is_valid_pickcode
 from yarl import URL
 
 
@@ -124,4 +127,20 @@ def to_cdn_url(
     if not prefix or prefix == "proapi":
         return url
     return str(urlp.with_host(host).with_path(prefix + urlp.path))
+
+
+def is_valid_id(id: int | str, /) -> bool:
+    if isinstance(id, int):
+        return id >= 0
+    if id == "0":
+        return True
+    return len(id) > 0 and not (id.startswith("0") or id.strip(digits))
+
+
+def is_valid_sha1(sha1: str, /) -> bool:
+    return len(sha1) == 40 and not sha1.strip(hexdigits)
+
+
+def is_valid_name(name: str, /) -> bool:
+    return not (">" in name or "/" in name)
 

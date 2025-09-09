@@ -120,6 +120,7 @@ def complete_url(
         elif app not in (
             "ios", "115ios", "android", "115android", "115ipad", 
             "qandroid", "qios", "wechatmini", "alipaymini", "tv", 
+            "apple_tv", 
         ):
             app = "android"
     if not base_url:
@@ -3631,7 +3632,6 @@ class P115OpenClient(ClientRequestMixin):
 
             - offset: int = 0  💡 索引偏移，索引从 0 开始计算
             - search_value: str = "." 💡 搜索文本，可以是 sha1
-            - show_dir: 0 | 1 = 1 💡 是否显示目录
             - source: str = <default>
             - star: 0 | 1 = <default> 💡 是否星标文件
             - suffix: str = <default> 💡 后缀名（优先级高于 `type`）
@@ -11606,7 +11606,7 @@ class P115Client(P115OpenClient):
             > POST https://passportapi.115.com/app/1.0/android/1.0/user/security_key_check
 
         :payload:
-            - safe_pwd: str = "" 💡 密码，如果需要进入隐藏模式，请传递此参数（值为密码的 md5 摘要）
+            - safe_pwd: str = "" 💡 密码，如果需要进入隐藏模式，请传递此参数（值为密码的 md5 哈希值）
             - show: 0 | 1 = 1    💡 0: 退出 1:进入
         """
         api = complete_url("/files/hiddenswitch", base_url=base_url, app=app)
@@ -14768,7 +14768,6 @@ class P115Client(P115OpenClient):
 
             - offset: int = 0  💡 索引偏移，索引从 0 开始计算
             - search_value: str = "." 💡 搜索文本，可以是 sha1
-            - show_dir: 0 | 1 = 1     💡 是否显示目录
             - source: str = <default> 💡 来源
             - star: 0 | 1 = <default> 💡 是否打星标
             - suffix: str = <default> 💡 文件后缀（扩展名），优先级高于 `type`
@@ -14862,7 +14861,6 @@ class P115Client(P115OpenClient):
 
             - offset: int = 0  💡 索引偏移，索引从 0 开始计算
             - search_value: str = "." 💡 搜索文本，可以是 sha1
-            - show_dir: 0 | 1 = 1 💡 是否显示目录
             - source: str = <default>
             - star: 0 | 1 = <default> 💡 是否星标文件
             - suffix: str = <default> 💡 后缀名（优先级高于 `type`）
@@ -14958,7 +14956,6 @@ class P115Client(P115OpenClient):
 
             - offset: int = 0  💡 索引偏移，索引从 0 开始计算
             - search_value: str = "." 💡 搜索文本，可以是 sha1
-            - show_dir: 0 | 1 = 1 💡 是否显示目录
             - source: str = <default>
             - star: 0 | 1 = <default> 💡 是否星标文件
             - suffix: str = <default> 💡 后缀名（优先级高于 `type`）

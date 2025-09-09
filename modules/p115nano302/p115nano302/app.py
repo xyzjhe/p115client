@@ -26,7 +26,7 @@ from p115rsacipher import encrypt, decrypt
 
 CRE_COOKIES_UID_search: Final = re_compile(r"(?<=\bUID=)[^\s;]+").search
 CRE_name_search: Final = re_compile(r"[^&=]+(?=&|$)").match
-_CACHE_DIR = Path("~/.p115client.cache.d")
+_CACHE_DIR = Path("~/.p115client.cache.d").expanduser()
 _CACHE_DIR.mkdir(exist_ok=True)
 _CACHE_FILE_PICKCODE_STABLE_POINT = _CACHE_DIR / "pickcode_stable_points.resp"
 
@@ -77,7 +77,7 @@ def make_application(
     RECEIVE_CODE_MAP: dict[str, str] = {}
 
     PASSWORD = password
-    d_cookies = {ick: ck for ck in cookies.split("\n") if (ick := get_user_id_from_cookies(ck))}
+    d_cookies: dict[str, str] = {ick: ck for ck in cookies.split("\n") if (ick := get_user_id_from_cookies(ck))}
     d_pcsp: dict[str, str] = {}
 
     app = Application(router=Router(), show_error_details=debug)
@@ -138,9 +138,9 @@ def make_application(
         if not refresh and (id := SHA1_TO_ID.get(key, 0)):
             return id
         if cid or size >= 0:
-            payload = {"cid": cid, "fc": 2, "limit": 100, "search_value": sha1, "show_dir": 0, "type": 99}
+            payload = {"cid": cid, "fc": 0, "limit": 100, "search_value": sha1}
             for offset in range(0, 10_000, 100):
-                if offset and resp["count"] >= offset:
+                if offset and resp["count"] <= offset:
                     break
                 payload["offset"] = offset
                 resp: dict = await urlopen(
@@ -190,40 +190,27 @@ def make_application(
             key = (user_id, name)
         if not refresh and (id := NAME_TO_ID.get(key, 0)):
             return id
-        payload = {"cid": cid, "fc": 2, "limit": 100, "search_value": name, "show_dir": 0, "type": 99}
+        payload = {"cid": cid, "fc": 0, "limit": 10_000, "search_value": name}
         suffix = name.rpartition(".")[-1]
         if suffix.isalnum():
             payload["suffix"] = suffix
-        checked = False
-        for offset in range(0, 10_000, 100):
-            if offset and resp["count"] >= offset:
-                break
-            payload["offset"] = offset
-            resp: dict = await urlopen(
+        resp: dict = await urlopen(
+            "https://webapi.115.com/files/search", 
+            params=payload, 
+            headers={"cookie": cookies}, 
+            check=False, 
+        )
+        if get_first(resp, "errno", "errNo", default=0) == 20021:
+            payload.pop("suffix")
+            resp = await urlopen(
                 "https://webapi.115.com/files/search", 
                 params=payload, 
                 headers={"cookie": cookies}, 
-                check=checked, 
             )
-            if not checked:
-                if get_first(resp, "errno", "errNo", default=0) == 20021:
-                    payload.pop("suffix")
-                    resp = await urlopen(
-                        "https://webapi.115.com/files/search", 
-                        params=payload, 
-                        headers={"cookie": cookies}, 
-                    )
-                elif not resp["state"]:
-                    raise OSError(errno.EIO, resp)
-                checked = True
-            for info in resp["data"]:
-                if info["n"] != name:
-                    raise FileNotFoundError(
-                        errno.ENOENT, 
-                        {"user_id": user_id, "name": name, "size": size, "cid": cid, "error": "not found"}, 
-                    )
-                if size >= 0 and int(info["s"]) != size:
-                    continue
+        elif not resp["state"]:
+            raise OSError(errno.EIO, resp)
+        for info in resp["data"]:
+            if info["n"] == name and (size < 0 and int(info["s"]) == size):
                 id = NAME_TO_ID[key] = int(info["fid"])
                 return id
         raise FileNotFoundError(
@@ -256,47 +243,32 @@ def make_application(
             receive_code = await get_receive_code(share_code, user_id=user_id)
         payload = {
             "cid": cid, 
-            "fc": 2, 
-            "limit": 100, 
+            "fc": 0, 
+            "limit": 10_000, 
             "receive_code": receive_code, 
             "search_value": name, 
             "share_code": share_code, 
-            "show_dir": 0, 
-            "type": 99, 
         }
         suffix = name.rpartition(".")[-1]
         if suffix.isalnum():
             payload["suffix"] = suffix
-        checked = False
-        for offset in range(0, 10_000, 100):
-            if offset and resp["count"] >= offset:
-                break
-            payload["offset"] = offset
-            resp: dict = await urlopen(
+        resp: dict = await urlopen(
+            "https://webapi.115.com/share/search", 
+            params=payload, 
+            headers={"cookie": cookies}, 
+            check=False, 
+        )
+        if get_first(resp, "errno", "errNo", default=0) == 20021:
+            payload.pop("suffix")
+            resp = await urlopen(
                 "https://webapi.115.com/share/search", 
                 params=payload, 
                 headers={"cookie": cookies}, 
-                check=False, 
             )
-            if not checked:
-                if get_first(resp, "errno", "errNo", default=0) == 20021:
-                    payload.pop("suffix")
-                    resp = await urlopen(
-                        "https://webapi.115.com/share/search", 
-                        params=payload, 
-                        headers={"cookie": cookies}, 
-                    )
-                elif not resp["state"]:
-                    raise OSError(errno.EIO, resp)
-                checked = True
-            for info in resp["data"]["list"]:
-                if info["n"] != name:
-                    raise FileNotFoundError(
-                        errno.ENOENT, 
-                        {"share_code": share_code, "name": name, "size": size, "cid": cid, "error": "not found"}, 
-                    )
-                if size >= 0 and int(info["s"]) != size:
-                    continue
+        elif not resp["state"]:
+            raise OSError(errno.EIO, resp)
+        for info in resp["data"]["list"]:
+            if info["n"] == name and (size < 0 or int(info["s"]) == size):
                 id = SHARE_NAME_TO_ID[key] = int(info["fid"])
                 return id
         raise FileNotFoundError(

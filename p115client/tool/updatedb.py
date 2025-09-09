@@ -9,35 +9,33 @@ __all__ = [
 __doc__ = "这个模块提供了一些和更新数据库有关的函数"
 
 from collections.abc import (
-    AsyncIterator, Callable, Coroutine, Iterable, Iterator, Sequence, 
+    AsyncIterator, Callable, Collection, Coroutine, Iterable, Iterator, Sequence, 
 )
-from csv import writer
-from itertools import batched
 from math import inf
-from ntpath import normpath
 from os import PathLike
-from os.path import expanduser
 from sqlite3 import connect, register_adapter, register_converter, Connection, Cursor
 from time import time
-from typing import overload, Any, Literal
+from typing import cast, overload, Any, Literal
 from warnings import warn
 
 from asynctools import ensure_async
 from errno2 import errno
+from iter_collect import grouped_mapping
 from iterutils import (
     bfs_gen, chunked, foreach, run_gen_step, run_gen_step_iter, 
     with_iter_next, Yield, 
 )
 from orjson import dumps, loads
-from p115client import P115Client, P115Warning
+from p115client import normalize_attr_simple, P115Client, P115Warning
 from p115pickcode import to_id
 from posixpatht import path_is_dir_form, escape, splits
-from sqlitetools import execute, find, query, transact, upsert_items, AutoCloseConnection
+from sqlitetools import execute, find, query, upsert_items, AutoCloseConnection
 
 from .attr import get_ancestors
-from .iterdir import iter_nodes_using_event, traverse_tree
-from .life import iter_life_behavior_list
 from .history import iter_history_list
+from .iterdir import iterdir, iter_nodes_using_event, traverse_tree
+from .life import iter_life_behavior_list
+from .util import posix_escape_name
 
 
 register_adapter(list, dumps)
@@ -343,10 +341,10 @@ def updatedb(
     upsert = wrap_async(upsert_items, async_, threaded=True)
     cid = to_id(cid)
     def gen_step():
+        total = 0
         if recursive:
             start_t = int(time())
             try:
-                total = 0
                 if cid and not has_id(con, cid):
                     ancestors = yield get_ancestors(
                         client, 
@@ -361,7 +359,15 @@ def updatedb(
                         if ancestors[0]["id"] == 0:
                             ancestors = ancestors[1:]
                         if ancestors:
-                            total += (yield upsert(con, ancestors, {"is_alive": 1}, commit=True)).rowcount
+                            to_pickcode = client.to_pickcode
+                            for a in ancestors:
+                                a["pickcode"] = to_pickcode(a["id"], "fa")
+                            total += (yield upsert(
+                                con, 
+                                ancestors, 
+                                {"is_alive": 1}, 
+                                commit=True, 
+                            )).rowcount
                 with with_iter_next(chunked(
                     traverse_tree(
                         client, 
@@ -415,10 +421,62 @@ UPDATE data SET is_alive = 0 WHERE id in (
                     clean_sql, 
                     commit=True, 
                 )).rowcount
-            return total
         else:
-            # TODO: 拉取一级
-            raise NotImplementedError
+            id_to_dirnode: dict[int, tuple[str, int]] = {}
+            seen_ids: set[int] = set()
+            try:
+                with with_iter_next(chunked(iterdir(
+                    client, 
+                    cid, 
+                    normalize_attr=normalize_attr_simple, 
+                    id_to_dirnode=id_to_dirnode, 
+                    raise_for_changed_count=True, 
+                    app=app, 
+                    cooldown=0.5, 
+                    max_workers=max_workers, 
+                    async_=async_, 
+                    **request_kwargs, 
+                ), 1000)) as get_next:
+                    while True:
+                        batch = yield get_next()
+                        total += (yield upsert(
+                            con, 
+                            batch, 
+                            extras={"is_alive": 1}, 
+                            fields=("id", "parent_id", "name", "sha1", "size", "pickcode", "is_dir"), 
+                            commit=True, 
+                        )).rowcount
+                        seen_ids.update(a["id"] for a in batch)
+                if id_to_dirnode:
+                    to_pickcode = client.to_pickcode
+                    total += (yield upsert(
+                        con, 
+                        [
+                            {"id": id, "name": name, "parent_id": pid, "ancestors": to_pickcode(id, "fa")} 
+                            for id, (name, pid) in id_to_dirnode.items()
+                            if id not in seen_ids
+                        ], 
+                        {"is_alive": 1}, 
+                        commit=True, 
+                    )).rowcount
+                clean_sql = "UPDATE data SET is_alive = 0 WHERE is_alive and parent_id = ?"
+                if seen_ids:
+                    clean_sql += " AND id NOT IN (%s)" % ",".join(map(str, seen_ids))
+                total += (yield wrap_async(execute, async_, threaded=True)(
+                    con, 
+                    clean_sql, 
+                    (cid,), 
+                    commit=True, 
+                )).rowcount
+            except FileNotFoundError:
+                clean_sql = "UPDATE data SET is_alive = 0 WHERE is_alive and parent_id = ?"
+                total = (yield wrap_async(execute, async_, threaded=True)(
+                    con, 
+                    clean_sql, 
+                    (cid,), 
+                    commit=True, 
+                )).rowcount
+        return total
     return run_gen_step(gen_step, async_)
 
 
@@ -960,6 +1018,52 @@ SELECT id, parent_id, name FROM t;""", id))
         except StopIteration:
             raise FileNotFoundError(errno.ENOENT, path) from None
 
+    def iter_children(
+        self, 
+        parent_id: int = 0, 
+        /, 
+        fields: Collection[str] = (), 
+        ensure_file: None | bool = None, 
+    ) -> Iterator[dict]:
+        """获取某个目录之下的文件或目录的信息
+
+        .. caution::
+            当 ``fields`` 为空时，获取全部字段
+
+        :param self: P115QueryDB 实例或者数据库连接或游标
+        :param parent_id: 父目录的 id
+        :param fields: 需要获取的字段
+        :param ensure_file: 是否仅输出文件
+
+            - 如果为 True，仅输出文件
+            - 如果为 False，仅输出目录
+            - 如果为 None，全部输出
+
+        :return: 迭代器，产生一组信息的字典，大概包含如下字段（具体由你的数据库 ``data`` 表确定）：
+
+            .. code:: python
+
+                (
+                    "id", "parent_id", "name", "sha1", "size", "pickcode", 
+                    "is_dir", "is_alive", "extra", "created_at", "updated_at", 
+                )
+        """
+        con: Any
+        if isinstance(self, P115QueryDB):
+            con = self.con
+        else:
+            con = self
+        if fields:
+            sql = f"SELECT {','.join(fields)} FROM data WHERE parent_id=? AND is_alive"
+        else:
+            sql = "SELECT * FROM data WHERE parent_id=? AND is_alive"
+        if ensure_file is not None:
+            if ensure_file:
+                sql += " AND NOT is_dir"
+            else:
+                sql += " AND is_dir"
+        return query(con, sql, parent_id, row_factory="dict")
+
     def iter_count_dir(
         self, 
         parent_id: int = 0, 
@@ -1022,7 +1126,6 @@ SELECT data.parent_id, count.* FROM count JOIN data USING (id)"""
                     "tree_file_count": int, 
                 }
         """
-        from iter_collect import grouped_mapping
         data = {a["id"]: a for a in P115QueryDB.iter_count_dir(self, parent_id)}
         id_to_children = grouped_mapping((a["parent_id"], id) for id, a in data.items())
         def calc(attr: dict, /) -> dict:
@@ -1038,43 +1141,6 @@ SELECT data.parent_id, count.* FROM count JOIN data USING (id)"""
                 attr["tree_file_count"] = attr["file_count"]
             return attr
         return map(calc, data.values())
-
-    def iter_children(
-        self, 
-        parent_id: int | dict = 0, 
-        /, 
-        ensure_file: None | bool = None, 
-    ) -> Iterator[dict]:
-        """获取某个目录之下的文件或目录的信息
-
-        :param self: P115QueryDB 实例或者数据库连接或游标
-        :param parent_id: 父目录的 id
-        :param ensure_file: 是否仅输出文件
-
-            - 如果为 True，仅输出文件
-            - 如果为 False，仅输出目录
-            - 如果为 None，全部输出
-
-        :return: 迭代器，产生一组信息的字典
-        """
-        con: Any
-        if isinstance(self, P115QueryDB):
-            con = self.con
-        else:
-            con = self
-        if isinstance(parent_id, int):
-            attr = P115QueryDB.get_attr(con, parent_id)
-        else:
-            attr = parent_id
-        if not attr["is_dir"]:
-            raise NotADirectoryError(errno.ENOTDIR, attr)
-        sql = "SELECT * FROM data WHERE parent_id=? AND is_alive"
-        if ensure_file is not None:
-            if ensure_file:
-                sql += " AND NOT is_dir"
-            else:
-                sql += " AND is_dir"
-        return query(con, sql, attr["id"], row_factory="dict")
 
     def iter_dangling_ids(
         self, 
@@ -1132,174 +1198,252 @@ WHERE
     d1.parent_id AND d2.id IS NULL"""
         return query(con, sql, row_factory="one")
 
+    @overload
     def iter_descendants(
         self, 
-        parent_id: int | dict = 0, 
+        parent_id: int = 0, 
         /, 
         min_depth: int = 1, 
         max_depth: int = -1, 
+        *, 
+        fields: str, 
+        escape: None | bool | Callable[[str], str] = True, 
         ensure_file: None | bool = None, 
-        use_relpath: None | bool = False, 
-        with_root: bool = False, 
+        topdown: None | bool = True, 
+    ) -> Iterator[Any]:
+        ...
+    @overload
+    def iter_descendants(
+        self, 
+        parent_id: int = 0, 
+        /, 
+        min_depth: int = 1, 
+        max_depth: int = -1, 
+        *, 
+        fields: Collection[str] | bool = True, 
+        escape: None | bool | Callable[[str], str] = True, 
+        ensure_file: None | bool = None, 
         topdown: None | bool = True, 
     ) -> Iterator[dict]:
-        """遍历获取某个目录之下的所有文件或目录的信息
+        ...
+    def iter_descendants(
+        self, 
+        parent_id: int = 0, 
+        /, 
+        min_depth: int = 1, 
+        max_depth: int = -1, 
+        *, 
+        fields: str | Collection[str] | bool = True, 
+        escape: None | bool | Callable[[str], str] = True, 
+        ensure_file: None | bool = None, 
+        topdown: None | bool = True, 
+    ) -> Iterator:
+        """获取某个目录之下的所有节点信息
+
+        .. caution::
+            当 ``fields`` 为空时，获取全部字段
 
         :param self: P115QueryDB 实例或者数据库连接或游标
         :param parent_id: 顶层目录的 id
         :param min_depth: 最小深度
         :param max_depth: 最大深度。如果小于 0，则无限深度
+        :param fields: 需要获取的字段
+
+            - 如果为 str，直接获取这个字段的值（不返回字典）
+            - 如果为 True，获取所有字段，且包括（"ancestors", "path", "relpath", "depth"），返回字典
+            - 如果为 False，获取所有字段，但除了（"ancestors", "path", "relpath", "depth"），返回字典
+            - 否则，获取所指定的这组字段，返回字典
+
+        :param escape: 对文件名进行转义
+
+            - 如果为 None，则不处理；否则，这个函数用来对文件名中某些符号进行转义，例如 "/" 等
+            - 如果为 True，则使用 `posixpatht.escape`，会对文件名中 "/"，或单独出现的 "." 和 ".." 用 "\\" 进行转义
+            - 如果为 False，则使用 `posix_escape_name` 函数对名字进行转义，会把文件名中的 "/" 转换为 "|"
+            - 如果为 Callable，则用你所提供的调用，以或者转义后的名字
+
         :param ensure_file: 是否仅输出文件
 
             - 如果为 True，仅输出文件
             - 如果为 False，仅输出目录
             - 如果为 None，全部输出
 
-        :param use_relpath: 是否仅输出相对路径。如果为 False，则输出完整路径（从 / 开始）；如果为 None，则不输出 "ancestors", "path", "posixpath"
-        :param with_root: 仅当 `use_relpath=True` 时生效。如果为 True，则相对路径包含 `parent_id` 对应的节点
         :param topdown: 是否自顶向下深度优先遍历
 
             - 如果为 True，则自顶向下深度优先遍历
             - 如果为 False，则自底向上深度优先遍历
             - 如果为 None，则自顶向下宽度优先遍历
 
-        :return: 迭代器，产生一组信息的字典，包含如下字段：
+        :return: 迭代器，产生一组信息的字典，大概包含如下字段：
 
             .. code:: python
 
                 (
-                    "id", "parent_id", "pickcode", "sha1", "name", "size", "is_dir", 
-                    "type", "is_alive", "extra", "created_at", "updated_at", 
-                    "depth", "ancestors", "path", "posixpath", 
+                    # NOTE: 这些具体由你的数据库 ``data`` 表确定
+                    "id", "parent_id", "name", "sha1", "size", "pickcode", 
+                    "is_dir", "is_alive", "extra", "created_at", "updated_at", 
+                    # NOTE: 这些是另外附加的字段
+                    "ancestors", "path", "relpath", "depth", 
                 )
         """
+        if 0 <= max_depth < min_depth:
+            return
         con: Any
         if isinstance(self, P115QueryDB):
             con = self.con
         else:
             con = self
-        with_path = use_relpath is not None
-        if isinstance(parent_id, int):
-            if 0 <= max_depth < min_depth:
-                return
-            depth = 1
-            if with_path:
-                if not parent_id:
-                    ancestors: list[dict] = [{"id": 0, "parent_id": 0, "name": ""}]
-                    dir_ = posixdir = "/"
-                elif use_relpath:
-                    if with_root:
-                        attr = parent_id = P115QueryDB.get_attr(con, parent_id)
-                        name = attr["name"]
-                        ancestors = [{"id": attr["id"], "parent_id": attr["parent_id"], "name": name}]
-                        dir_ = escape(name) + "/"
-                        posixdir = name.replace("/", "|") + "/"
-                    else:
-                        ancestors = []
-                        dir_ = posixdir = ""
-                else:
-                    ancestors = P115QueryDB.get_ancestors(con, parent_id)
-                    dir_ = "/".join(escape(a["name"]) for a in ancestors) + "/"
-                    posixdir = "/".join(a["name"].replace("/", "|") for a in ancestors) + "/"
-        else:
-            attr = parent_id
-            depth = attr["depth"] + 1
-            if with_path:
-                ancestors = attr["ancestors"]
-                dir_ = attr["path"]
-                posixdir = attr["posixpath"]
-                if dir_ != "/":
-                    dir_ += "/"
-                    posixdir += "/"
-        if topdown is None:
-            if with_path:
-                gen = bfs_gen((parent_id, 0, ancestors, dir_, posixdir))
+        if isinstance(escape, bool):
+            if escape:
+                from posixpatht import escape
             else:
-                gen = bfs_gen((parent_id, 0)) # type: ignore
+                escape = posix_escape_name
+        escape = cast(None | Callable[[str], str], escape)
+        field: str = ""
+        if isinstance(fields, bool) or not fields:
+            with_ancestors = with_path = with_relpath = with_depth = fields if isinstance(fields, bool) else True
+            children_fields = set()
+        else:
+            if isinstance(fields, str):
+                field = fields
+                fields = {field}
+            else:
+                fields = set(fields)
+            with_ancestors = "ancestors" in fields
+            with_path = "path" in fields
+            with_relpath = "relpath" in fields
+            with_depth = "depth" in fields
+            children_fields = fields - frozenset(("ancestors", "path", "relpath", "depth")) | {"id", "is_dir"}
+            if with_ancestors or with_path or with_relpath:
+                children_fields |= frozenset(("name", "parent_id"))
+        ancestors: list[dict] = []
+        dir_: str = ""
+        reldir: str = ""
+        if parent_id:
+            if with_ancestors or with_path:
+                ancestors = P115QueryDB.get_ancestors(con, parent_id)
+                if with_path:
+                    if escape is None:
+                        dir_ = "".join(a["name"] + "/" for a in ancestors)
+                    else:
+                        dir_ = "".join(escape(a["name"]) + "/" for a in ancestors)
+        else:
+            if with_ancestors:
+                ancestors = [{"id": 0, "parent_id": 0, "name": ""}]
+            if with_path:
+                dir_ = "/"
+        def may_yield(attr: dict, /):
+            if ensure_file is None or (attr["is_dir"] ^ ensure_file):
+                if field:
+                    yield attr[field]
+                else:
+                    yield attr
+        children_ensure_file = False if ensure_file is False else None
+        if topdown is None:
+            gen = bfs_gen((parent_id, 0, ancestors, dir_, reldir))
             send: Callable = gen.send
-            p: list
-            for parent_id, depth, *p in gen:
+            for parent_id, depth, ancestors, dir_, reldir in gen:
                 depth += 1
                 will_step_in = max_depth < 0 or depth < max_depth
                 will_yield = min_depth <= depth and (max_depth < 0 or depth <= max_depth)
-                if with_path:
-                    ancestors, dir_, posixdir = p
-                for attr in P115QueryDB.iter_children(con, parent_id, False if ensure_file is False else None):
-                    attr["depth"] = depth
-                    is_dir = attr["is_dir"]
-                    if with_path:
+                for attr in P115QueryDB.iter_children(
+                    con, 
+                    parent_id, 
+                    fields=children_fields, 
+                    ensure_file=children_ensure_file, 
+                ):
+                    if with_depth:
+                        attr["depth"] = depth
+                    if with_ancestors:
                         attr["ancestors"] = [
                             *ancestors, 
                             {k: attr[k] for k in ("id", "parent_id", "name")}, 
                         ]
-                        attr["path"] = dir_ + escape(attr["name"])
-                        attr["posixpath"] = posixdir + attr["name"].replace("/", "|")
-                    if is_dir and will_step_in:
+                    if with_path or with_relpath:
+                        name = attr["name"]
+                        if escape is not None:
+                            name = escape(name)
                         if with_path:
-                            send((attr, depth, attr["ancestors"], attr["path"] + "/", attr["posixpath"] + "/"))
-                        else:
-                            send((attr, depth))
+                            attr["path"] = dir_ + name
+                        if with_relpath:
+                            attr["relpath"] = reldir + name
+                    if will_step_in and attr["is_dir"]:
+                        send((
+                            attr["id"], 
+                            depth, 
+                            attr["ancestors"] if with_ancestors else None, 
+                            attr["path"] + "/" if with_path else "", 
+                            attr["relpath"] + "/" if with_relpath else "", 
+                        ))
                     if will_yield:
-                        if ensure_file is None:
-                            yield attr
-                        elif is_dir:
-                            if not ensure_file:
-                                yield attr
-                        elif ensure_file:
-                            yield attr
+                        yield from may_yield(attr)
         else:
-            will_step_in = max_depth < 0 or depth < max_depth
-            will_yield = min_depth <= depth and (max_depth < 0 or depth <= max_depth)
-            for attr in P115QueryDB.iter_children(con, parent_id, False if ensure_file is False else None):
-                is_dir = attr["is_dir"]
-                attr["depth"] = depth
-                if with_path:
-                    attr["ancestors"] = [
-                        *ancestors, 
-                        {k: attr[k] for k in ("id", "parent_id", "name")}, 
-                    ]
-                    attr["path"] = dir_ + escape(attr["name"])
-                    attr["posixpath"] = posixdir + attr["name"].replace("/", "|")
-                if will_yield and topdown:
-                    if ensure_file is None:
-                        yield attr
-                    elif is_dir:
-                        if not ensure_file:
-                            yield attr
-                    elif ensure_file:
-                        yield attr
-                if is_dir and will_step_in:
-                    yield from P115QueryDB.iter_descendants(
-                        con, 
-                        attr, 
-                        min_depth=min_depth, 
-                        max_depth=max_depth, 
-                        ensure_file=ensure_file, 
-                        use_relpath=use_relpath, 
-                        with_root=with_root, 
-                        topdown=topdown, 
-                    )
-                if will_yield and not topdown:
-                    if ensure_file is None:
-                        yield attr
-                    elif is_dir:
-                        if not ensure_file:
-                            yield attr
-                    elif ensure_file:
-                        yield attr
+            cache: dict[Iterator, dict] = {}
+            stack: list[tuple[Iterator[dict], list[dict], str, str]] = [(
+                iter(tuple(P115QueryDB.iter_children(
+                    con, 
+                    parent_id, 
+                    fields=children_fields, 
+                    ensure_file=children_ensure_file, 
+                ))), ancestors, dir_, reldir)]
+            depth = 0
+            while depth >= 0:
+                attrs, ancestors, dir_, reldir = stack[depth]
+                depth += 1
+                will_step_in = max_depth < 0 or depth < max_depth
+                will_yield = min_depth <= depth and (max_depth < 0 or depth <= max_depth)
+                for attr in attrs:
+                    if with_depth:
+                        attr["depth"] = depth
+                    if with_ancestors:
+                        attr["ancestors"] = [
+                            *ancestors, 
+                            {k: attr[k] for k in ("id", "parent_id", "name")}, 
+                        ]
+                    if with_path or with_relpath:
+                        name = attr["name"]
+                        if escape is not None:
+                            name = escape(name)
+                        if with_path:
+                            attr["path"] = dir_ + name
+                        if with_relpath:
+                            attr["relpath"] = reldir + name
+                    if will_yield and topdown:
+                        yield from may_yield(attr)
+                    if will_step_in and attr["is_dir"]:
+                        attrs = iter(tuple(P115QueryDB.iter_children(
+                            con, 
+                            attr["id"], 
+                            fields=children_fields, 
+                            ensure_file=children_ensure_file, 
+                        )))
+                        quadruple = (
+                            attrs, 
+                            attr["ancestors"] if with_ancestors else ancestors, 
+                            attr["path"] + "/" if with_path else "", 
+                            attr["relpath"] + "/" if with_relpath else "", 
+                        )
+                        try:
+                            stack[depth] = quadruple
+                        except IndexError:
+                            stack.append(quadruple)
+                        if will_yield and not topdown:
+                            cache[attrs] = attr
+                        break
+                    if will_yield and not topdown:
+                        yield from may_yield(attr)
+                else:
+                    if cache and attrs in cache:
+                        yield from may_yield(cache.pop(attrs))
+                    depth -= 2
 
     @overload
     def iter_descendants_bfs(
         self, 
         parent_id: int = 0, 
         /, 
-        min_depth: int = 1, 
-        max_depth: int = -1, 
-        ensure_file: None | bool = None, 
-        use_relpath: bool = False, 
-        with_root: bool = False, 
         *, 
         fields: str, 
+        escape: None | bool | Callable[[str], str] = True, 
     ) -> Iterator[Any]:
         ...
     @overload
@@ -1307,214 +1451,144 @@ WHERE
         self, 
         parent_id: int = 0, 
         /, 
-        min_depth: int = 1, 
-        max_depth: int = -1, 
-        ensure_file: None | bool = None, 
-        use_relpath: bool = False, 
-        with_root: bool = False, 
         *, 
-        fields: tuple[str, ...] = (
-            "id", "parent_id", "name", "sha1", "size", "pickcode", 
-            "is_dir", "is_alive", "extra", "created_at", "updated_at", 
-            "depth", "ancestors", "path", "posixpath", 
-        ), 
-        to_dict: Literal[False], 
-    ) -> Iterator[tuple[Any, ...]]:
-        ...
-    @overload
-    def iter_descendants_bfs(
-        self, 
-        parent_id: int = 0, 
-        /, 
-        min_depth: int = 1, 
-        max_depth: int = -1, 
-        ensure_file: None | bool = None, 
-        use_relpath: bool = False, 
-        with_root: bool = False, 
-        *, 
-        fields: tuple[str, ...] = (
-            "id", "parent_id", "name", "sha1", "size", "pickcode", 
-            "is_dir", "is_alive", "extra", "created_at", "updated_at", 
-            "depth", "ancestors", "path", "posixpath", 
-        ), 
-        to_dict: Literal[True] = True, 
-    ) -> Iterator[dict[str, Any]]:
+        fields: Collection[str] | bool = True, 
+        escape: None | bool | Callable[[str], str] = True, 
+    ) -> Iterator[dict]:
         ...
     def iter_descendants_bfs(
         self, 
         parent_id: int = 0, 
         /, 
-        min_depth: int = 1, 
-        max_depth: int = -1, 
-        ensure_file: None | bool = None, 
-        use_relpath: bool = False, 
-        with_root: bool = False, 
         *, 
-        fields: str | tuple[str, ...] = (
-            "id", "parent_id", "name", "sha1", "size", "pickcode", 
-            "is_dir", "is_alive", "extra", "created_at", "updated_at", 
-            "depth", "ancestors", "path", "posixpath", 
-        ), 
-        to_dict: bool = True, 
+        fields: str | Collection[str] | bool = True, 
+        escape: None | bool | Callable[[str], str] = True, 
     ) -> Iterator:
-        """获取某个目录之下的所有目录节点的 id 或者信息字典（宽度优先遍历）
+        """获取某个目录之下的所有节点信息
+
+        .. caution::
+            当 ``fields`` 为空时，获取全部字段        
 
         :param self: P115QueryDB 实例或者数据库连接或游标
         :param parent_id: 顶层目录的 id
-        :param min_depth: 最小深度
-        :param max_depth: 最大深度。如果小于 0，则无限深度
-        :param ensure_file: 是否仅输出文件
-
-            - 如果为 True，仅输出文件
-            - 如果为 False，仅输出目录
-            - 如果为 None，全部输出
-
-        :param use_relpath: 仅输出相对路径，否则输出完整路径（从 / 开始）
-        :param with_root: 仅当 `use_relpath=True` 时生效。如果为 True，则相对路径包含 `parent_id` 对应的节点
         :param fields: 需要获取的字段
 
-            - 如果为 str，则获取指定的字段的值
-            - 如果为 tuple，则拉取这一组字段的值
+            - 如果为 str，直接获取这个字段的值（不返回字典）
+            - 如果为 True，获取所有字段，且包括（"ancestors", "path", "relpath", "depth"），返回字典
+            - 如果为 False，获取所有字段，但除了（"ancestors", "path", "relpath", "depth"），返回字典
+            - 否则，获取所指定的这组字段，返回字典
 
-        :param to_dict: 是否产生字典，如果为 True 且 fields 不为 str，则产生字典
+        :param escape: 对文件名进行转义
 
-        :return: 迭代器，产生一组数据
+            - 如果为 None，则不处理；否则，这个函数用来对文件名中某些符号进行转义，例如 "/" 等
+            - 如果为 True，则使用 `posixpatht.escape`，会对文件名中 "/"，或单独出现的 "." 和 ".." 用 "\\" 进行转义
+            - 如果为 False，则使用 `posix_escape_name` 函数对名字进行转义，会把文件名中的 "/" 转换为 "|"
+            - 如果为 Callable，则用你所提供的调用，以或者转义后的名字
+
+        :return: 迭代器，产生一组信息的字典，大概包含如下字段：
+
+            .. code:: python
+
+                (
+                    # NOTE: 这些具体由你的数据库 ``data`` 表确定
+                    "id", "parent_id", "name", "sha1", "size", "pickcode", 
+                    "is_dir", "is_alive", "extra", "created_at", "updated_at", 
+                    # NOTE: 这些是另外附加的字段
+                    "ancestors", "path", "relpath", "depth", 
+                )
         """
         con: Any
         if isinstance(self, P115QueryDB):
             con = self.con
         else:
             con = self
-        extended_fields = frozenset(("depth", "ancestors", "path", "posixpath"))
-        one_value = False
-        parse: None | Callable = None
-        if isinstance(fields, str):
-            one_value = True
-            field = fields
-            with_depth = max_depth > 1 or "depth" == field
-            with_ancestors = "ancestors" == field
-            with_path = "path" == field
-            with_posixpath = "posixpath" == field
-            fields = field,
+        if isinstance(escape, bool):
+            if escape:
+                from posixpatht import escape
+            else:
+                escape = posix_escape_name
+        escape = cast(None | Callable[[str], str], escape)
+        field: str = ""
+        if isinstance(fields, bool) or not fields:
+            with_depth = with_ancestors = with_path = with_relpath = fields if isinstance(fields, bool) else True
+            fields = "*"
+            fields1 = "*"
+            fields2 = "data.*"
         else:
-            with_depth = max_depth > 1 or min_depth > 1 or "depth" in fields
+            if isinstance(fields, str):
+                field = fields
+                fields = {field}
+            else:
+                fields = set(fields)
+            fields.add("id")
+            with_depth = "depth" in fields
             with_ancestors = "ancestors" in fields
             with_path = "path" in fields
-            with_posixpath = "posixpath" in fields
-        select_fields1 = ["id"]
-        select_fields1.extend(set(fields) - {"id"} - extended_fields)
-        select_fields2 = ["data." + f for f in select_fields1]
-        where1, where2 = "", ""
-        if with_depth:
-            select_fields1.append("1 AS depth")
-            select_fields2.append("t.depth + 1")
-        if with_path or with_posixpath or with_ancestors:
-            if not parent_id:
-                ancestors: list[dict] = [{"id": 0, "parent_id": 0, "name": ""}]
-                path = posixpath = "/"
-            elif use_relpath:
-                if with_root:
-                    attr = P115QueryDB.get_attr(con, parent_id)
-                    name = attr["name"]
-                    ancestors = [{"id": attr["id"], "parent_id": attr["parent_id"], "name": name}]
-                    path = escape(name) + "/"
-                    posixpath = name.replace("/", "|") + "/"
+            with_relpath = "relpath" in fields
+            if with_depth or with_ancestors or with_path or with_relpath:
+                fields.add("parent_id")
+                fields.add("name")
+            fields -= frozenset(("depth", "ancestors", "path", "relpath"))
+            fields1 = ",".join(fields)
+            fields2 = ",".join("data." + f for f in fields)
+        sql = f"""\
+WITH t AS (
+    SELECT {fields1} FROM data WHERE parent_id={parent_id:d} AND is_alive
+    UNION ALL
+    SELECT {fields2} FROM t JOIN data ON(t.id = data.parent_id) WHERE data.is_alive
+) SELECT * FROM t"""
+        row_factory: str | Callable = "any"
+        if with_depth or with_ancestors or with_path or with_relpath:
+            if with_depth:
+                d_depth = {parent_id: 0}
+            if with_ancestors or with_path:
+                if parent_id:
+                    ancestors = P115QueryDB.get_ancestors(con, parent_id)
+                    if with_ancestors:
+                        d_ancestors = {parent_id: ancestors}
+                    if with_path:
+                        if escape is None:
+                            d_path = {parent_id: "".join(a["name"] + "/" for a in ancestors)}
+                        else:
+                            d_path = {parent_id: "".join(escape(a["name"]) + "/" for a in ancestors)}
                 else:
-                    ancestors = []
-                    path = posixpath = ""
-            else:
-                ancestors = P115QueryDB.get_ancestors(con, parent_id)
-                if with_path:
-                    path = "/".join(escape(a["name"]) for a in ancestors) + "/"
-                if with_posixpath:
-                    posixpath = "/".join(a["name"].replace("/", "|") for a in ancestors) + "/"
-            if with_ancestors:
-                if ancestors:
-                    parse_ancestors = lambda val: [*ancestors, *loads("[%s]" % val)]
-                else:
-                    parse_ancestors = lambda val: loads("[%s]" % val)
-                parse = parse_ancestors
-                select_fields1.append("json_object('id', id, 'parent_id', parent_id, 'name', name) AS ancestors")
-                select_fields2.append("concat(t.ancestors, ',', json_object('id', data.id, 'parent_id', data.parent_id, 'name', data.name))")
-            if with_path:
-                def parse_path(val: str, /) -> str:
-                    return path + val
-                parse = parse_path
-                if isinstance(con, Cursor):
-                    conn = con.connection
-                else:
-                    conn = con
-                conn.create_function("escape_name", 1, escape, deterministic=True)
-                select_fields1.append("escape_name(name) AS path")
-                select_fields2.append("concat(t.path, '/', escape_name(data.name))")
-            if with_posixpath:
-                def parse_posixpath(val: str, /) -> str:
-                    return posixpath + val
-                parse = parse_posixpath
-                select_fields1.append("replace(name, '/', '|') AS posixpath")
-                select_fields2.append("concat(t.posixpath, '/', replace(data.name, '/', '|'))")
-        if min_depth <= 1 and max_depth in (0, 1) or 0 <= max_depth < min_depth:
-            if 0 <= max_depth < min_depth:
-                where1 = " AND FALSE"
-            elif ensure_file:
-                where1 = " AND NOT is_dir"
-            elif ensure_file is False:
-                where1 = " AND is_dir"
-            sql = f"""\
-    WITH t AS (
-        SELECT {",".join(select_fields1)} FROM data WHERE parent_id={parent_id:d} AND is_alive{where1}
-    ) SELECT {",".join(fields)} FROM t"""
-        else:
-            if max_depth > 1:
-                where2 = f" AND depth < {max_depth:d}"
-            if ensure_file:
-                if "is_dir" not in fields:
-                    select_fields1.append("is_dir")
-                    select_fields2.append("data.is_dir")
-            elif ensure_file is False:
-                where1 += " AND is_dir"
-                where2 += " AND data.is_dir"
-            sql = f"""\
-    WITH t AS (
-        SELECT {",".join(select_fields1)} FROM data WHERE parent_id={parent_id:d} AND is_alive{where1}
-        UNION ALL
-        SELECT {",".join(select_fields2)} FROM t JOIN data ON(t.id = data.parent_id) WHERE data.is_alive{where2}
-    ) SELECT {",".join(fields)} FROM t WHERE True"""
-            if ensure_file:
-                sql += " AND NOT is_dir"
-            if min_depth > 1:
-                sql += f" AND depth >= {min_depth:d}"
-        if one_value:
-            if parse is None:
-                row_factory = lambda _, r: r[0]
-            else:
-                row_factory = lambda _, r: parse(r[0])
-        elif to_dict:
-            def row_factory(_, r):
-                d = dict(zip(fields, r))
+                    if with_ancestors:
+                        d_ancestors = {0: [{"id": 0, "parent_id": 0, "name": ""}]}
+                    if with_path:
+                        d_path = {0: "/"}
+            if with_relpath:
+                d_relpath = {parent_id: ""}
+            cursor_fields: None | tuple[str, ...] = None
+            def row_factory(cursor, record, /):
+                nonlocal cursor_fields
+                if cursor_fields is None:
+                    cursor_fields = tuple(f[0] for f in cursor.description)
+                attr = dict(zip(cursor_fields, record))
+                id, pid, name = attr["id"], attr["parent_id"], attr["name"]
+                if with_depth:
+                    d_depth[id] = attr["depth"] = d_depth[pid] + 1
                 if with_ancestors:
-                    d["ancestors"] = parse_ancestors(d["ancestors"])
+                    attr["ancestors"] = [*d_ancestors[pid], {"id": id, "parent_id": pid, "name": name}]
+                if escape is not None and (with_path or with_relpath):
+                    name = escape(name)
                 if with_path:
-                    d["path"] = parse_path(d["path"])
-                if with_posixpath:
-                    d["posixpath"] = parse_posixpath(d["posixpath"])
-                return d
+                    attr["path"] = d_path[pid] + name
+                if with_relpath:
+                    attr["relpath"] = d_relpath[pid] + name
+                if attr.get("is_dir", True):
+                    if with_ancestors:
+                        d_ancestors[id] = attr["ancestors"]
+                    if with_path:
+                        d_path[id] = attr["path"] + "/"
+                    if with_relpath:
+                        d_relpath[id] = attr["relpath"] + "/"
+                if field:
+                    return attr[field]
+                return attr
+        elif field:
+            row_factory = "one"
         else:
-            with_route = with_ancestors or with_path or with_posixpath
-            def parse(f, v):
-                match f:
-                    case "ancestors":
-                        return parse_ancestors(v)
-                    case "path":
-                        return parse_path(v)
-                    case "posixpath":
-                        return parse_posixpath(v)
-                    case _:
-                        return v
-            def row_factory(_, r):
-                if with_route:
-                    return tuple(parse(f, v) for f, v in zip(fields, r))
-                return r
+            row_factory = "dict"
         return query(con, sql, row_factory=row_factory)
 
     def iter_dup_files(
@@ -1568,35 +1642,6 @@ SELECT * FROM stats WHERE total > 1"""
         if is_alive:
             sql += " AND is_alive"
         return query(con, sql, row_factory="one")
-
-    def iter_files_with_path_url(
-        self, 
-        parent_id: int = 0, 
-        /, 
-        base_url: str = "http://localhost:8000", 
-    ) -> Iterator[tuple[str, str]]:
-        """迭代获取所有文件的路径和下载链接
-
-        :param self: P115QueryDB 实例或者数据库连接或游标
-        :param parent_id: 顶层目录的 id
-        :param base_url: 115 的 302 服务后端地址
-
-        :return: 迭代器，返回每个文件的 路径 和 下载链接 的 2 元组
-        """
-        from encode_uri import encode_uri_component_loose
-        con: Any
-        if isinstance(self, P115QueryDB):
-            con = self.con
-        else:
-            con = self
-        code = compile('f"%s/{quote(name, '"''"')}?{id=}&{pickcode=!s}&{sha1=!s}&{size=}&file=true"' % base_url.translate({ord(c): c*2 for c in "{}"}), "-", "eval")
-        for attr in P115QueryDB.iter_descendants_bfs(
-            con, 
-            parent_id, 
-            fields=("id", "sha1", "pickcode", "size", "name", "posixpath"), 
-            ensure_file=True, 
-        ):
-            yield attr["posixpath"], eval(code, {"quote": encode_uri_component_loose}, attr)
 
     def iter_id_to_parent_id(
         self, 
@@ -1746,113 +1791,4 @@ WITH pairs AS (
             finally:
                 clear()
         return na_ids
-
-    def dump_to_alist(
-        self, 
-        /, 
-        alist_db: str | PathLike | Connection | Cursor = expanduser("~/alist.d/data/data.db"), 
-        parent_id: int = 0, 
-        dirname: str = "/115", 
-        clean: bool = True, 
-    ) -> int:
-        """把 p115updatedb 导出的数据，导入到 alist 的搜索索引
-
-        :param self: P115QueryDB 实例或者数据库连接或游标
-        :param alist_db: alist 数据库文件路径或连接
-        :param parent_id: 在 p115updatedb 所导出数据库中的顶层目录 id
-        :param dirname: 在 alist 中所对应的的顶层目录路径
-        :param clean: 在插入前先清除 alist 的数据库中 `dirname` 目录下的所有数据
-
-        :return: 总共导入的数量
-        """
-        con: Any
-        if isinstance(self, P115QueryDB):
-            con = self.con
-        else:
-            con = self
-        sql = """\
-WITH t AS (
-    SELECT 
-        :dirname AS parent, 
-        name, 
-        is_dir, 
-        size, 
-        id, 
-        CASE WHEN is_dir THEN CONCAT(:dirname, '/', REPLACE(name, '/', '|')) END AS dirname 
-    FROM data WHERE parent_id=:parent_id AND is_alive
-    UNION ALL
-    SELECT 
-        t.dirname AS parent, 
-        data.name, 
-        data.is_dir, 
-        data.size, 
-        data.id, 
-        CASE WHEN data.is_dir THEN CONCAT(t.dirname, '/', REPLACE(data.name, '/', '|')) END AS dirname
-    FROM t JOIN data ON(t.id = data.parent_id) WHERE data.is_alive
-)
-SELECT parent, name, is_dir, size FROM t"""
-        dirname = "/" + dirname.strip("/")
-        with transact(alist_db) as cur:
-            if clean:
-                cur.execute("DELETE FROM x_search_nodes WHERE parent=? OR parent LIKE ? || '/%';", (dirname, dirname))
-            count = 0
-            executemany = cur.executemany
-            for items in batched(query(con, sql, {"parent_id": parent_id, "dirname": dirname}), 10_000):
-                executemany("INSERT INTO x_search_nodes(parent, name, is_dir, size) VALUES (?, ?, ?, ?)", items)
-                count += len(items)
-            return count
-
-    def dump_efu(
-        self, 
-        /, 
-        efu_file: str | PathLike = "export.efu", 
-        parent_id: int = 0, 
-        dirname: str = "", 
-        use_relpath: bool = False, 
-    ) -> int:
-        """把 p115updatedb 导出的数据，导出为 efu 文件，可供 everything 软件使用
-
-        :param self: P115QueryDB 实例或者数据库连接或游标
-        :param efu_file: 要导出的文件路径
-        :param parent_id: 在 p115updatedb 所导出数据库中的顶层目录 id
-        :param dirname: 给每个导出路径添加的目录前缀
-        :param use_relpath: 是否使用相对路径
-
-        :return: 总共导出的数量
-        """
-        con: Any
-        if isinstance(self, P115QueryDB):
-            con = self.con
-        else:
-            con = self
-        def unix_to_filetime(unix_time: float, /) -> int:
-            return int(unix_time * 10 ** 7) + 11644473600 * 10 ** 7
-        if dirname:
-            dirname = normpath(dirname)
-            if not dirname.endswith("\\"):
-                dirname += "\\"
-        n = 0
-        with open(efu_file, "w", newline="", encoding="utf-8") as file:
-            csvfile = writer(file)
-            writerow = csvfile.writerow
-            writerow(("Filename", "Size", "Date Modified", "Date Created", "Attributes"))
-            for n, (size, ctime, mtime, is_dir, path) in enumerate(P115QueryDB.iter_descendants_bfs(
-                con, 
-                parent_id, 
-                use_relpath=use_relpath, 
-                fields=("size", "created_at", "updated_at", "is_dir", "posixpath"), 
-                to_dict=False, 
-            ), 1):
-                if use_relpath:
-                    path = normpath(path)
-                else:
-                    path = normpath(path[1:])
-                writerow((
-                    dirname + path, 
-                    size, 
-                    unix_to_filetime(mtime), 
-                    unix_to_filetime(ctime), 
-                    16 if is_dir else 0, 
-                ))
-        return n
 

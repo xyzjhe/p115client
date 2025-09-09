@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "p115nano302"
-version = "0.1.2"
+version = "0.1.2.3"
 description = "115 nano 302 backend."
 authors = ["ChenyangGao <wosiwujm@gmail.com>"]
 license = "MIT"
@@ -28,7 +28,7 @@ include = [
 [tool.poetry.dependencies]
 python = "^3.12"
 blacksheep = "*"
-blacksheep_client_request = ">=0.0.4"
+blacksheep_client_request = ">=0.1.2"
 blacksheep-rich-log = ">=0.0.2"
 cachedict = ">=0.0.6"
 orjson = "*"
@@ -40,7 +40,6 @@ uvicorn = "*"
 
 [tool.poetry.scripts]
 p115nano302 = "p115nano302.__main__:main"
-nano302 = "p115nano302.__main__:main"
 
 [build-system]
 requires = ["poetry-core"]

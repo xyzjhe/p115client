@@ -1358,12 +1358,14 @@ def iter_download_nodes(
                 return attrs
             check_response(resp)
             nodes = {
-                int(node["file_id"]): unescape_115_charref(node["file_name"])
-                for node in resp["data"]
+                int(node["file_id"]): (
+                    ("name", unescape_115_charref(node["file_name"])), 
+                    ("sha1", node["sha1"]), 
+                ) for node in resp["data"]
             }
             for attr in attrs:
-                if name := nodes.get(attr["id"]):
-                    attr["name"] = name
+                if items := nodes.get(attr["id"]):
+                    attr.update(items)
             return attrs
         return run_gen_step(request(attrs), async_)
     def parse(_, content: bytes, /) -> dict:

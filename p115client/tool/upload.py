@@ -510,7 +510,7 @@ def upload_init(
     :param file: 待上传的文件或其路径
     :param pid: 上传文件到目录的 id 或 pickcode
     :param filename: 文件名，若为空则自动确定
-    :param filesha1: 文件的 sha1 摘要，若为空则自动计算
+    :param filesha1: 文件的 sha1 哈希值，若为空则自动计算
     :param filesize: 文件大小，若为负数则自动计算
     :param endpoint: 上传目的网址
     :param async_: 是否异步
@@ -568,7 +568,7 @@ class P115MultipartUpload:
 
         client = P115Client(Path("~/115-cookies.txt").expanduser())
 
-        # TODO: 待上传文件的路径（同样也支持 URL）
+        # NOTE: 待上传文件的路径（同样也支持 URL）
         path = "/path/to/file"
 
         uploader = P115MultipartUpload.from_path(path, user_id=client.user_id, user_key=client.user_key)
@@ -710,7 +710,7 @@ class P115MultipartUpload:
         :param path: 待上传的文件路径
         :param pid: 上传文件到目录的 id 或 pickcode
         :param filename: 文件名，若为空则自动确定
-        :param filesha1: 文件的 sha1 摘要，若为空则自动计算
+        :param filesha1: 文件的 sha1 哈希值，若为空则自动计算
         :param filesize: 文件大小，若为负数则自动计算
         :param user_id: 用户 id
         :param user_key: 用户的 key
