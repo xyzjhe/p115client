@@ -13,7 +13,7 @@ from collections.abc import (
 )
 from math import inf
 from os import PathLike
-from sqlite3 import connect, register_adapter, register_converter, Connection, Cursor
+from sqlite3 import register_adapter, register_converter, Connection, Cursor
 from time import time
 from typing import cast, overload, Any, Literal
 from warnings import warn
@@ -29,7 +29,7 @@ from orjson import dumps, loads
 from p115client import normalize_attr_simple, P115Client, P115Warning
 from p115pickcode import to_id
 from posixpatht import path_is_dir_form, escape, splits
-from sqlitetools import execute, find, query, upsert_items, AutoCloseConnection
+from sqlitetools import connect, execute, find, query, upsert_items
 
 from .attr import get_ancestors
 from .history import iter_history_list
@@ -181,13 +181,7 @@ def _init_client(
     if isinstance(dbfile, (Connection, Cursor)):
         con = dbfile
     else:
-        con = connect(
-            dbfile, 
-            check_same_thread=False, 
-            factory=AutoCloseConnection, 
-            timeout=inf, 
-            uri=isinstance(dbfile, str) and dbfile.startswith("file:"), 
-        )
+        con = connect(dbfile, check_same_thread=False, timeout=inf)
         if init_sql is None:
             updatedb_initdb(con)
         elif init_sql:
@@ -719,17 +713,9 @@ class P115QueryDB:
     def __init__(
         self, 
         /, 
-        con: str | PathLike | Connection | Cursor, 
+        con: bytes | str | PathLike | Connection | Cursor, 
     ):
-        if not isinstance(con, (Connection, Cursor)):
-            con = connect(
-                con, 
-                check_same_thread=False, 
-                factory=AutoCloseConnection, 
-                timeout=inf, 
-                uri=isinstance(con, str) and con.startswith("file:"), 
-            )
-        self.con = con
+        self.con = connect(con, check_same_thread=False, timeout=inf)
 
     def get_ancestors(
         self, 
