@@ -1267,5 +1267,6 @@ class P115MultipartUpload:
         for part_number in count(part_number_start):
             yield get_url(part_number, headers=headers)
 
+
 # TODO: 增加一个工具函数，用于从某个本地目录下载到网盘目录，允许提供自定义的进度条调用
 # TODO: 增加一个工具函数，用于在两个115网盘之间的转移，允许提供自定义的进度条调用

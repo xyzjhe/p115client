@@ -2801,7 +2801,7 @@ def iter_nodes_using_info(
             partial(client.fs_category_get, base_url="https://webapi.115.com"), 
             partial(client.fs_category_get_app, base_url="https://proapi.115.com"), 
         )).__next__
-    elif app in ("web", "desktop", "harmony"):
+    elif app in ("web", "desktop", "aps"):
         get_method = cycle((
             # partial(client.fs_category_get, base_url="http://web.api.115.com"), 
             partial(client.fs_category_get, base_url="https://webapi.115.com"), 
@@ -3490,7 +3490,7 @@ def search_iter(
         client = P115Client(client, check_for_relogin=True)
     if not isinstance(client, P115Client) or app == "open":
         fs_search: Callable = client.fs_search_open
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         fs_search = client.fs_search
     else:
         fs_search = partial(client.fs_search_app, app=app)
@@ -3625,7 +3625,7 @@ def share_iterdir(
         client = P115Client("")
     elif isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         share_snap: Callable = client.share_snap
     else:
         share_snap = partial(client.share_snap_app, app=app)
@@ -3974,7 +3974,7 @@ def share_iter_files(
         cid = cast(int, cid["id"])
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         share_downlist: Callable = client.share_downlist
     else:
         share_downlist = client.share_downlist_app
@@ -4215,7 +4215,7 @@ def extract_iterdir(
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
     pickcode = client.to_pickcode(pickcode)
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         extract_list: Callable = client.extract_list
     else:
         extract_list = partial(client.extract_list_app, app=app)
@@ -4516,7 +4516,7 @@ def extract_iter_files(
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
     pickcode = client.to_pickcode(pickcode)
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         extract_folders: Callable = client.extract_folders
     else:
         extract_folders = partial(client.extract_folders_app, app=app)

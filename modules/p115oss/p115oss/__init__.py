@@ -22,11 +22,12 @@ from collections.abc import (
 )
 from datetime import datetime, timedelta
 from email.utils import formatdate
-from hashlib import sha1
+from hashlib import md5, sha1
 from hmac import digest as hmac_digest
 from inspect import isawaitable, iscoroutinefunction, signature
 from itertools import count
 from os import fsdecode, fstat, stat, PathLike
+from re import compile as re_compile
 from threading import Lock
 from typing import cast, overload, Any, Final, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -59,6 +60,8 @@ _HEADERS: Final = {"user-agent": "", "accept-encoding": "identity"}
 _UPLOAD_TOKEN: Final[dict[str, str]] = {}
 _UPLOAD_TOKEN_LOCK: Final = Lock()
 _UPLOAD_TOKEN_ASYNC_LOCK: Final = AsyncLock()
+
+CRE_UID_in_COOKIE_search: Final = re_compile(r"(?<=\bUID=)\w+").search
 
 
 @overload
@@ -157,13 +160,16 @@ def determine_partsize(
 ) -> int:
     """确定分片上传（multipart upload）时的分片大小
 
+    .. note::
+        分块大小至少 100 KB
+
     :param size: 数据大小
     :param min_part_size:  用户期望的分片大小
     :param max_part_count: 最大的分片个数
 
     :return: 分片大小
     """
-    min_part_size = 1024 * 1024 * 10
+    min_part_size = 1024 * 100
     if size <= min_part_size:
         return min_part_size
     n = -(-size // max_part_count)
@@ -335,7 +341,7 @@ def upload_init(
     )
     request_kwargs.update(make_upload_payload(data))
     def parse_upload_init_response(_, content: bytes, /) -> dict:
-        data = ecdh_aes_decrypt(content, decompress=True)
+        data = ecdh_aes_decrypt(content)
         return parse_json(None, data)
     request_kwargs.setdefault("parse", parse_upload_init_response)
     return get_request(request_kwargs, async_=async_)(url=api, **request_kwargs)
@@ -398,7 +404,7 @@ def upload_init_open(
 
 @overload
 def upload_resume(
-    payload: dict, 
+    payload: dict | str, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -406,14 +412,14 @@ def upload_resume(
     ...
 @overload
 def upload_resume(
-    payload: dict, 
+    payload: dict | str, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
 ) -> Coroutine[Any, Any, dict]:
     ...
 def upload_resume(
-    payload: dict, 
+    payload: dict | str, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -439,22 +445,32 @@ def upload_resume(
     :return: 接口响应
     """
     api = "https://uplb.115.com/3.0/resumeupload.php"
-    data: dict = dict(payload)
-    if "pickcode" not in data:
+    if isinstance(payload, str):
+        data: dict = {"pickcode": payload}
+    else:
+        data = dict(payload)
+        if "pickcode" not in data:
+            if "pick_code" in data:
+                data["pickcode"] = data["pick_code"]
+        callback_var: None | dict = None
         if "callback_var" in data:
             callback_var = loads(data["callback_var"])
         elif "callback" in data:
             callback_var = loads(data["callback"]["callback_var"])
-        else:
-            raise ValueError(f"invalid payload: {payload!r}")
-        data.update(
-            pickcode=callback_var["x:pick_code"], 
-            target=callback_var["x:target"], 
-            userid=callback_var["x:user_id"]
-        )
+        if callback_var:
+            data.update(
+                pickcode=callback_var["x:pick_code"], 
+                target=callback_var["x:target"], 
+                userid=callback_var["x:user_id"], 
+            )
     data.setdefault("fileid", "0" * 40)
     data.setdefault("filesize", 1)
     data.setdefault("target", "U_1_0")
+    if "userid" not in data:
+        for k, v in iter_items(request_kwargs.get("headers") or ()):
+            if k.lower() == "cookie" and (m := CRE_UID_in_COOKIE_search(v)):
+                data["userid"] = m[0]
+                break
     request_kwargs.update(method="POST", data=data)
     return get_request(request_kwargs, async_=async_)(url=api, **request_kwargs)
 
@@ -509,12 +525,14 @@ def upload_resume_open(
     else:
         data = dict(payload)
         if "pick_code" not in data:
-            if "callback_var" in data:
-                callback_var = loads(data["callback_var"])
-            elif "callback" in data:
-                callback_var = loads(data["callback"]["callback_var"])
-            else:
-                raise ValueError(f"invalid payload: {payload!r}")
+            if "pickcode" in data:
+                data["pick_code"] = data["pickcode"]
+        callback_var: None | dict = None
+        if "callback_var" in data:
+            callback_var = loads(data["callback_var"])
+        elif "callback" in data:
+            callback_var = loads(data["callback"]["callback_var"])
+        if callback_var:
             data.update(
                 pick_code=callback_var["x:pick_code"], 
                 target=callback_var["x:target"], 
@@ -568,7 +586,7 @@ def oss_upload_sign(
 
     :return: 带认证信息的请求头
     """
-    # subresource_keys = (
+    # subresource_keys = frozenset((
     #     "accessPoint", "accessPointPolicy", "acl", "append", "asyncFetch", "bucketArchiveDirectRead", 
     #     "bucketInfo", "callback", "callback-var", "cname", "comp", "continuation-token", "cors", 
     #     "delete", "encryption", "endTime", "group", "httpsConfig", "inventory", "inventoryId", 
@@ -584,7 +602,7 @@ def oss_upload_sign(
     #     "x-oss-ac-source-ip", "x-oss-ac-subnet-mask", "x-oss-ac-vpc-id", "x-oss-access-point-name", 
     #     "x-oss-async-process", "x-oss-process", "x-oss-redundancy-transition-taskid", "x-oss-request-payer", 
     #     "x-oss-target-redundancy-type", "x-oss-traffic-limit", "x-oss-write-get-object-response", 
-    # )
+    # ))
     def gen_step():
         nonlocal headers, token
         if not token:
@@ -772,6 +790,7 @@ def oss_multipart_part_iter(
 def oss_multipart_upload_init(
     url: str, 
     token: None | dict = None, 
+    params: Mapping = {"sequential": "1", "uploads": "1"}, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -781,6 +800,7 @@ def oss_multipart_upload_init(
 def oss_multipart_upload_init(
     url: str, 
     token: None | dict = None, 
+    params: Mapping = {"sequential": "1", "uploads": "1"}, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -789,6 +809,7 @@ def oss_multipart_upload_init(
 def oss_multipart_upload_init(
     url: str, 
     token: None | dict = None, 
+    params: Mapping = {"sequential": "1", "uploads": "1"}, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -802,10 +823,7 @@ def oss_multipart_upload_init(
 
     :return: 分块上传任务的 id
     """
-    request_kwargs.update(
-        method="POST", 
-        params={"sequential": "1", "uploads": "1"}, 
-    )
+    request_kwargs.update(method="POST", params=params)
     request_kwargs.setdefault("parse", parse_upload_id)
     return oss_upload_request(
         url=url, 
@@ -871,6 +889,9 @@ def oss_multipart_upload_complete(
                 async_=async_, 
                 **request_kwargs, 
             ))
+        last_part = parts[-1]
+        parts = [p for p in parts[:-1] if p["Size"] >= 1024 * 100]
+        parts.append(last_part)
         request_kwargs.update(
             method="POST", 
             params={"uploadId": upload_id}, 
@@ -1012,8 +1033,10 @@ def oss_multipart_upload_part(
             }
     """
     count_in_bytes = 0
+    hashobj = md5()
     if isinstance(file, Buffer):
         count_in_bytes = buffer_length(file)
+        hashobj.update(file)
     else:
         if isinstance(file, SupportsRead):
             if async_:
@@ -1023,9 +1046,14 @@ def oss_multipart_upload_part(
         def acc(chunk: Buffer, /):
             nonlocal count_in_bytes
             count_in_bytes += buffer_length(chunk)
+            hashobj.update(chunk)
         file = wrap_iter(file, callnext=acc)
     def parse_upload_part(resp, _, /) -> dict:
         headers = resp.headers
+        md5 = hashobj.hexdigest().upper()
+        server_md5 = headers["ETag"].strip('"')
+        if md5 != server_md5:
+            raise OSError(5, f"the server side failed to submit data, because of the md5 does not match {md5!r} != {server_md5!r}")
         return {
             "PartNumber": part_number, 
             "LastModified": datetime.strptime(headers["date"], "%a, %d %b %Y %H:%M:%S GMT").strftime("%FT%X.%f")[:-3] + "Z", 
@@ -1112,7 +1140,6 @@ def oss_multipart_upload_part_iter(
         file = bytes_iter_to_reader(cast(Iterable, file))
     def gen_step():
         chunk: Buffer | Iterator[Buffer] | AsyncIterator[Buffer]
-        end_with_reporthook = reporthook is not None and isinstance(file, Buffer)
         for i, part_number in enumerate(count(part_number_start)):
             if isinstance(file, Buffer):
                 chunk = memoryview(file)[i*partsize:(i+1)*partsize]
@@ -1124,11 +1151,10 @@ def oss_multipart_upload_part_iter(
                 else:
                     chunk = bio_chunk_iter(cast(SupportsRead, file), partsize)
                 chunk = yield peek_iter(chunk)
-                if not chunk:
+                if chunk is None:
                     break
-                chunk = cast(Iterator[Buffer] | AsyncIterator[Buffer], chunk)
                 if reporthook is not None:
-                    chunk = wrap_iter(chunk, callnext=lambda b: reporthook(buffer_length(b)))
+                    chunk = wrap_iter(chunk, callnext=lambda b, /: reporthook(buffer_length(b))) # type: ignore
             part = yield Yield(oss_multipart_upload_part(
                 url=url, 
                 file=chunk, # type: ignore
@@ -1138,9 +1164,12 @@ def oss_multipart_upload_part_iter(
                 async_=async_, # type: ignore
                 **request_kwargs, 
             ))
-            if end_with_reporthook:
-                reporthook(buffer_length(chunk)) # type: ignore
-            if part["Size"] < partsize:
+            if reporthook is not None and isinstance(chunk, Buffer):
+                ret = reporthook(buffer_length(chunk))
+                if async_ and isawaitable(ret):
+                    yield ret
+            size = part["Size"]
+            if size < partsize:
                 break
     return run_gen_step_iter(gen_step, async_)
 
@@ -1219,13 +1248,12 @@ def oss_upload_init(
         except (AttributeError, TypeError):
             pass
         if isinstance(file, Buffer):
-            data = file
-            filesize = buffer_length(data)
+            filesize = buffer_length(file)
             if filesize == 0:
                 filesha1 = "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"
             elif not filesha1:
-                filesha1 = sha1(data).hexdigest()
-            def read_range(sign_check: str, /) -> bytes:
+                filesha1 = sha1(file).hexdigest()
+            def read_range(sign_check: str, /, data=file) -> bytes:
                 start, end = map(int, sign_check.split("-"))
                 return memoryview(data)[start:end+1].tobytes()
         elif isinstance(file, SupportsRead):
@@ -1519,7 +1547,7 @@ def oss_multipart_upload(
     callback: dict, 
     url: str = "", 
     upload_id: None | str = None, 
-    partsize: int = 1024 * 1024 * 10, 
+    partsize: int = 1024 * 1024 * 100, 
     parts: None | list[dict] = None, 
     token: None | dict = None, 
     reporthook: None | Callable[[int], Any] = None, 
@@ -1535,7 +1563,7 @@ def oss_multipart_upload(
     callback: dict, 
     url: str = "", 
     upload_id: None | str = None, 
-    partsize: int = 1024 * 1024 * 10, 
+    partsize: int = 1024 * 1024 * 100, 
     parts: None | list[dict] = None, 
     token: None | dict = None, 
     reporthook: None | Callable[[int], Any] = None, 
@@ -1550,7 +1578,7 @@ def oss_multipart_upload(
     callback: dict, 
     url: str = "", 
     upload_id: None | str = None, 
-    partsize: int = 1024 * 1024 * 10, 
+    partsize: int = 1024 * 1024 * 100, 
     parts: None | list[dict] = None, 
     token: None | dict = None, 
     reporthook: None | Callable[[int], Any] = None, 
@@ -1563,6 +1591,11 @@ def oss_multipart_upload(
 
     .. attention::
         如果需要跳过一定的数据，请提前处理好，这个不管数据是否被重复上传    
+
+    .. note::
+        1. 允许每次上传的分块大小不同
+        2. 最后提交分块的时候（即 ``oss_multipart_upload_complete`` 的 ``parts`` 参数），可以只选择其中一些分块信息进行提交（而忽略掉那些有问题的分块，因为后面又有重新上传了）
+        3. 除了最后一个分块，其它分块上传的大小必须 >= 100 KB，如果不足，那么即使成功上传，此分块也要被忽略，否则是会报错的
 
     :param file: 文件数据
     :param callback: 回调数据
@@ -1579,7 +1612,9 @@ def oss_multipart_upload(
     :return: 接口响应
     """
     if partsize <= 0:
-        partsize = 1024 * 1024 * 10
+        partsize = 1024 * 1024 * 100
+    else:
+        partsize = max(partsize, 1024 * 100)
     def gen_step():
         nonlocal url, upload_id, parts
         if not url or upload_id:
@@ -1651,8 +1686,9 @@ def upload(
     user_id: int | str = "", 
     user_key: str = "", 
     partsize: int = 0, 
-    callback: None | dict = None, 
+    callback: None | str | dict = None, 
     upload_id: str = "", 
+    reporthook: None | Callable[[int], Any] = None, 
     endpoint: str = "http://oss-cn-shenzhen.aliyuncs.com", 
     *, 
     async_: Literal[False] = False, 
@@ -1669,8 +1705,9 @@ def upload(
     user_id: int | str = "", 
     user_key: str = "", 
     partsize: int = 0, 
-    callback: None | dict = None, 
+    callback: None | str | dict = None, 
     upload_id: str = "", 
+    reporthook: None | Callable[[int], Any] = None, 
     endpoint: str = "http://oss-cn-shenzhen.aliyuncs.com", 
     *, 
     async_: Literal[True], 
@@ -1686,8 +1723,9 @@ def upload(
     user_id: int | str = "", 
     user_key: str = "", 
     partsize: int = 0, 
-    callback: None | dict = None, 
+    callback: None | str | dict = None, 
     upload_id: str = "", 
+    reporthook: None | Callable[[int], Any] = None, 
     endpoint: str = "http://oss-cn-shenzhen.aliyuncs.com", 
     *, 
     async_: Literal[False, True] = False, 
@@ -1701,7 +1739,7 @@ def upload(
         此时可以省略 ``pid``、``filename``、``filesha1``、``filesize``、``user_id``、``user_key``、``partsize``
 
     .. caution::
-        ``partsize > 0`` 时，不要把 ``partsize`` 设置得太小，起码得 10 MB (10485760) 以上
+        ``partsize > 0`` 时，不要把 ``partsize`` 设置得太小，至少 100 KB (102400)
 
     :param file: 待上传的文件或其路径
     :param pid: 上传文件到目录的 id
@@ -1713,6 +1751,7 @@ def upload(
     :param partsize: 分块大小（如果为 0，则不是分块上传；如果 <0，则自动确定）
     :param callback: 回调数据
     :param upload_id: 上传任务 id
+    :param reporthook: 回调函数，可以用来统计已上传的数据量或者展示进度条
     :param endpoint: 上传目的网址
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
@@ -1720,55 +1759,122 @@ def upload(
     :return: 接口响应
     """
     def gen_step():
-        nonlocal file, partsize, callback
-        parts: None | list[dict] = None
+        nonlocal file, partsize, callback, upload_id
+        parts: list[dict] = []
         skip_size = 0
-        if callback:
-            resp = yield upload_resume(callback, async_=async_, **request_kwargs)
-            if not resp["state"]:
-                return resp
-            url = upload_endpoint_url(resp["object"], resp["bucket"], endpoint=endpoint)
-            if upload_id:
-                parts = []
-                yield foreach(
-                    parts.append, 
-                    oss_multipart_part_iter(
+        try:
+            if callback:
+                if isinstance(callback, str) and user_id:
+                    params: Any = {"callback": callback, "userid": user_id}
+                else:
+                    params = callback
+                resp = yield upload_resume(
+                    params, 
+                    async_=async_, 
+                    **request_kwargs, 
+                )
+                if not resp.get("state", True):
+                    return resp
+                callback = cast(dict, resp["callback"])
+                url = upload_endpoint_url(resp["object"], resp["bucket"], endpoint=endpoint)
+                if upload_id:
+                    parts = []
+                    yield foreach(
+                        parts.append, 
+                        oss_multipart_part_iter(
+                            url=url, 
+                            upload_id=upload_id, 
+                            async_=async_, 
+                            **request_kwargs, 
+                        ), 
+                    )
+                    skip_size = sum(p["Size"] for p in parts if p["Size"] >= 1024 * 100)
+                    if filesize >= 0:
+                        if skip_size > filesize:
+                            raise OSError(5, "excessive uploads have been detected, please re-upload")
+                        if parts:
+                            last_part_size = parts[-1]["Size"]
+                            if last_part_size < 1024 * 100 and skip_size + last_part_size == filesize:
+                                skip_size == filesize
+                    if skip_size and reporthook is not None:
+                        ret = reporthook(skip_size)
+                        if async_ and isawaitable(ret):
+                            yield ret
+            else:
+                upload_id = ""
+                resp = yield oss_upload_init(
+                    file=file, 
+                    pid=pid, 
+                    filename=filename, 
+                    filesha1=filesha1, 
+                    filesize=filesize, 
+                    user_id=user_id, 
+                    user_key=user_key, 
+                    endpoint=endpoint, 
+                    async_=async_, 
+                    **request_kwargs, 
+                )
+                if not resp["state"] or resp["reuse"]:
+                    return resp
+                upload_data = resp["data"]
+                url = upload_data["url"]
+                callback = cast(dict, upload_data["callback"])
+                if partsize:
+                    if partsize < 0:
+                        partsize = determine_partsize(upload_data["filesize"])
+                    else:
+                        partsize = max(partsize, 1024 * 100)
+                else:
+                    if isinstance(file, SupportsRead):
+                        seek = getattr(file, "seek")
+                        if async_:
+                            yield ensure_async(seek, threaded=True)(0)
+                        else:
+                            seek(0)
+                    elif not isinstance(file, Buffer):
+                        path = file
+                        is_url = False
+                        if isinstance(path, str):
+                            is_url = path.startswith(("http://", "https://"))
+                        elif isinstance(path, (URL, SupportsGeturl)):
+                            is_url = True
+                            if isinstance(path, URL):
+                                path = str(path)
+                            else:
+                                path = path.geturl()
+                        else:
+                            path = fsdecode(path)
+                        path = cast(str, path)
+                        if is_url:
+                            if async_:
+                                from httpfile import AsyncHTTPFileReader
+                                async def process():
+                                    return await AsyncHTTPFileReader.new(cast(str, path), headers=_HEADERS)
+                                file = yield process()
+                            else:
+                                from httpfile import HTTPFileReader
+                                file = HTTPFileReader(path, headers=_HEADERS)
+                        else:
+                            file = open(path, "rb")
+                    file = cast(Buffer | SupportsRead, file)
+                    return oss_upload(
+                        file, 
+                        callback=callback, 
                         url=url, 
-                        upload_id=upload_id, 
+                        reporthook=reporthook, 
                         async_=async_, 
                         **request_kwargs, 
-                    ), 
-                )
-                skip_size = sum(p["Size"] for p in parts)
-        else:
-            resp = yield oss_upload_init(
-                file=file, 
-                pid=pid, 
-                filename=filename, 
-                filesha1=filesha1, 
-                filesize=filesize, 
-                user_id=user_id, 
-                user_key=user_key, 
-                endpoint=endpoint, 
-                async_=async_, 
-                **request_kwargs, 
-            )
-            if not resp["state"] or resp["reuse"]:
-                return resp
-            upload_data = resp["data"]
-            url = upload_data["url"]
-            callback = upload_data["callback"]
-            if partsize:
-                if partsize < 0:
-                    partsize = determine_partsize(upload_data["filesize"])
-            else:
+                    )
+            if not upload_id or filesize < 0 or skip_size < filesize:
                 if isinstance(file, SupportsRead):
                     seek = getattr(file, "seek")
                     if async_:
-                        yield ensure_async(seek, threaded=True)(0)
+                        yield ensure_async(seek, threaded=True)(skip_size)
                     else:
-                        seek(0)
-                elif not isinstance(file, Buffer):
+                        seek(skip_size)
+                elif isinstance(file, Buffer):
+                    file = memoryview(file)[skip_size:]
+                else:
                     path = file
                     is_url = False
                     if isinstance(path, str):
@@ -1786,65 +1892,44 @@ def upload(
                         if async_:
                             from httpfile import AsyncHTTPFileReader
                             async def process():
-                                return await AsyncHTTPFileReader.new(cast(str, path), headers=_HEADERS)
+                                return await AsyncHTTPFileReader.new(path, headers=_HEADERS, start=skip_size)
                             file = yield process()
                         else:
                             from httpfile import HTTPFileReader
-                            file = HTTPFileReader(path, headers=_HEADERS)
+                            file = HTTPFileReader(path, headers=_HEADERS, start=skip_size)
                     else:
                         file = open(path, "rb")
+                        if skip_size:
+                            file.seek(skip_size)
                 file = cast(Buffer | SupportsRead, file)
-                return oss_upload(
-                    file, 
+                return oss_multipart_upload(
+                    file=file, 
                     callback=callback, 
                     url=url, 
+                    upload_id=upload_id, 
+                    partsize=partsize, 
+                    parts=parts, 
+                    reporthook=reporthook, 
                     async_=async_, 
                     **request_kwargs, 
                 )
-        if isinstance(file, SupportsRead):
-            seek = getattr(file, "seek")
-            if async_:
-                yield ensure_async(seek, threaded=True)(skip_size)
             else:
-                seek(skip_size)
-        elif not isinstance(file, Buffer):
-            path = file
-            is_url = False
-            if isinstance(path, str):
-                is_url = path.startswith(("http://", "https://"))
-            elif isinstance(path, (URL, SupportsGeturl)):
-                is_url = True
-                if isinstance(path, URL):
-                    path = str(path)
-                else:
-                    path = path.geturl()
-            else:
-                path = fsdecode(path)
-            path = cast(str, path)
-            if is_url:
-                if async_:
-                    from httpfile import AsyncHTTPFileReader
-                    async def process():
-                        return await AsyncHTTPFileReader.new(path, headers=_HEADERS, start=skip_size)
-                    file = yield process()
-                else:
-                    from httpfile import HTTPFileReader
-                    file = HTTPFileReader(path, headers=_HEADERS, start=skip_size)
-            else:
-                file = open(path, "rb")
-                if skip_size:
-                    file.seek(skip_size)
-        file = cast(Buffer | SupportsRead, file)
-        return oss_multipart_upload(
-            file=file, 
-            callback=callback, 
-            url=url, 
-            upload_id=upload_id, 
-            partsize=partsize, 
-            parts=parts, 
-            async_=async_, 
-            **request_kwargs, 
-        )
+                return oss_multipart_upload_complete(
+                    url=url, 
+                    callback=callback, 
+                    upload_id=upload_id, 
+                    parts=parts, 
+                    async_=async_, 
+                    **request_kwargs, 
+                )
+        except BaseException as e:
+            data = locals()
+            upload_data = {k: data[k] for k in (
+                "pid", "filename", "filesha1", "filesize", "user_id", 
+                "user_key", "partsize", "callback", "upload_id", "endpoint")}
+            raise OSError(5, f"upload failed: {upload_data!r}") from e
     return run_gen_step(gen_step, async_)
 
-# TODO: 先用着，如果发现分块上传用断点续传，而有些已经上传的分块因为中途失败，导致上传的块太小，导致最后合并时报错，那么以后就要跳过这些分块（这是 partsize 会有一个限制的最小值，例如 64 KB，小于此值，则分块会被忽略）
+# NOTE: 参考代码: https://github.com/aliyun/aliyun-oss-python-sdk
+# TODO: callback 可以使用 pickcode 代替，因为可以通过 upload_resume 恢复
+# TODO: 可能需要每隔一定时间，并发执行一次 upload_resume

@@ -170,9 +170,9 @@ def _init_client(
 ) -> tuple[P115Client, Connection | Cursor]:
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
-    if client.login_app() in ("web", "desktop", "harmony"):
+    if client.login_app() in ("web", "desktop", "aps"):
         warn(
-            f'app within ("web", "desktop", "harmony") is not recommended, it will be replaced by "apple_tv" cookies', 
+            f'app within ("web", "desktop", "aps") is not recommended, it will be replaced by "apple_tv" cookies', 
             category=P115Warning, 
         )
         client.login_another_app("apple_tv", replace=True)

@@ -13,7 +13,6 @@ from collections.abc import (
     Iterable, Iterator, Mapping, MutableMapping, Sequence, 
 )
 from datetime import date, datetime, timedelta
-from ensure import ensure_bytes
 from functools import cached_property, partial
 from hashlib import md5, sha1
 from http.cookiejar import Cookie, CookieJar
@@ -38,6 +37,7 @@ from argtools import argcount
 from asynctools import ensure_async
 from cookietools import cookies_to_dict, update_cookies
 from dicttools import get_first, dict_update, dict_key_to_lower_merge, iter_items, KeyLowerDict
+from ensure import ensure_bytes
 from errno2 import errno
 from filewrap import SupportsRead
 from http_request import complete_url as make_url, SupportsGeturl
@@ -130,7 +130,7 @@ def default_parse(_, content: Buffer, /):
         content = memoryview(content)
     if content and content[0] + content[-1] not in (b"{}", b"[]", b'""'):
         try:
-            content = ecdh_aes_decrypt(content, decompress=True)
+            content = ecdh_aes_decrypt(content)
         except Exception:
             pass
     return json_loads(memoryview(content))
@@ -208,7 +208,7 @@ def default_check_for_relogin(e: BaseException, /) -> bool:
 
 
 def parse_upload_init_response(_, content: bytes, /) -> dict:
-    data = ecdh_aes_decrypt(content, decompress=True)
+    data = ecdh_aes_decrypt(content)
     if not isinstance(data, (bytes, bytearray, memoryview)):
         data = memoryview(data)
     return json_loads(data)
@@ -233,6 +233,9 @@ def check_response(resp: dict | Awaitable[dict], /) -> dict | Coroutine[Any, Any
             if "error" not in resp:
                 resp.setdefault("error", get_first(resp, "msg", "error_msg", "message", default=None))
             match code:
+                # {"state": False, "error": "网盘单个文件夹限5万个文件，请清理后再添加！", "errno": 2}
+                case 2:
+                    raise P115OperationalError(errno.EIO, resp)
                 # {"state": false, "errno": 99, "error": "请重新登录"}
                 case 99:
                     raise P115LoginError(errno.EAUTH, resp)
@@ -2341,7 +2344,7 @@ class P115OpenClient(ClientRequestMixin):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -2697,7 +2700,7 @@ class P115OpenClient(ClientRequestMixin):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -3742,6 +3745,19 @@ class P115OpenClient(ClientRequestMixin):
             payload = {"pick_code": payload}
         else:
             payload = dict(payload)
+            if "pick_code" not in payload:
+                if "pickcode" in payload:
+                    payload["pick_code"] = payload["pickcode"]
+            callback_var: None | dict = None
+            if "callback_var" in payload:
+                callback_var = loads(payload["callback_var"])
+            elif "callback" in payload:
+                callback_var = loads(payload["callback"]["callback_var"])
+            if callback_var:
+                payload.update(
+                    pick_code=callback_var["x:pick_code"], 
+                    target=callback_var["x:target"], 
+                )
         payload.setdefault("fileid", "0" * 40)
         payload.setdefault("file_size", 1)
         payload.setdefault("target", "U_1_0")
@@ -5315,12 +5331,13 @@ class P115Client(P115OpenClient):
             headers["cookie"] = ""
         else:
             request_kwargs.setdefault("cookies", self.cookies)
-        if ecdh_encrypt and (data := request_kwargs.get("data")):
+        if ecdh_encrypt:
             url = make_url(url, params=_default_k_ec)
-            if not isinstance(data, (Buffer, str, UserString)):
-                data = urlencode(data)
-            request_kwargs["data"] = ecdh_aes_encrypt(ensure_bytes(data) + b"&")
-            headers["content-type"] = "application/x-www-form-urlencoded"
+            if data := request_kwargs.get("data"):
+                if not isinstance(data, (Buffer, str, UserString)):
+                    data = urlencode(data)
+                request_kwargs["data"] = ecdh_aes_encrypt(ensure_bytes(data) + b"&")
+                headers["content-type"] = "application/x-www-form-urlencoded"
         need_fetch_cert_first = False
         if fetch_cert_headers is not None:
             fetch_cert_headers_argcount = argcount(fetch_cert_headers)
@@ -5496,25 +5513,17 @@ class P115Client(P115OpenClient):
             request_headers.update(url.get("headers") or ())
         if headers:
             request_headers.update(headers)
-        if async_:
-            if http_file_reader_cls is None:
-                from httpfile import AsyncHTTPFileReader
+        if http_file_reader_cls is None:
+            if async_:
                 http_file_reader_cls = AsyncHTTPFileReader
-            return http_file_reader_cls(
-                url, # type: ignore
-                headers=request_headers, 
-                start=start, 
-                seek_threshold=seek_threshold, 
-            )
-        else:
-            if http_file_reader_cls is None:
+            else:
                 http_file_reader_cls = HTTPFileReader
-            return http_file_reader_cls(
-                url, # type: ignore
-                headers=request_headers, 
-                start=start, 
-                seek_threshold=seek_threshold, 
-            )
+        return http_file_reader_cls(
+            url, # type: ignore
+            headers=request_headers, 
+            start=start, 
+            seek_threshold=seek_threshold, 
+        )
 
     ########## Activity API ##########
 
@@ -9004,7 +9013,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -9067,7 +9076,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -10442,7 +10451,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -10594,7 +10603,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -10733,7 +10742,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -10872,7 +10881,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -11195,7 +11204,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -11270,7 +11279,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -12308,7 +12317,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -13318,6 +13327,7 @@ class P115Client(P115OpenClient):
         .. note::
             1. 目录层级最多 25 级（不算文件节点的话）
             2. 名字不能包含 3 个字符之一 "<>，如果包含，则会被替换为 _
+            3. 单个目录内最多 5 万个文件（用网页上传、创建 Office 文档此限制）
 
         .. attention::
             这个方法并不产生 115 生活的操作事件
@@ -13376,6 +13386,7 @@ class P115Client(P115OpenClient):
         .. note::
             1. 目录层级最多 25 级（不算文件节点的话）
             2. 名字不能包含 3 个字符之一 "<>，但是文件可以通过上传来突破此限制
+            3. 单个目录内最多 5 万个文件（用网页上传、创建 Office 文档此限制）
 
         :payload:
             - cname: str
@@ -15021,7 +15032,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -15127,7 +15138,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -15235,7 +15246,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -17314,6 +17325,12 @@ class P115Client(P115OpenClient):
             - start_time: int = <default>
             - end_time: int = <default>
             - last_data: str = <default> 💡 需要经过 JSON序列化，格式为：{"last_time": int, "last_count": int, "total_count": int}
+            - operation_type: 0 | 1 | 2 | 3 = 0 💡 操作类型
+
+                - 0: 全部
+                - 1: 浏览
+                - 2: 移动复制
+                - 3: 重命名
         """
         api = complete_url(f"/api/1.0/{app}/1.0/life/recent_operations", base_url=base_url)
         if isinstance(payload, int):
@@ -22943,7 +22960,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -22951,6 +22968,8 @@ class P115Client(P115OpenClient):
             - cid: int | str = 0
             - limit: int = 32
             - offset: int = 0
+            - o: str = <default> 💡 排序依据：dtime:删除时间
+            - asc: 0 | 1 = <default>
             - source: str = <default>
         """ 
         api = complete_url("/rb", base_url=base_url)
@@ -23008,7 +23027,7 @@ class P115Client(P115OpenClient):
                 - 5: <unknown>
                 - 7: 回收站文件
                 - 9: <unknown>
-                - 12:瞬间文件
+                - 12: 瞬间文件
                 - 15: <unknown>
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
@@ -25200,7 +25219,7 @@ class P115Client(P115OpenClient):
         )
         request_kwargs.update(make_upload_payload(payload))
         def parse_upload_init_response(_, content: bytes, /) -> dict:
-            data = ecdh_aes_decrypt(content, decompress=True)
+            data = ecdh_aes_decrypt(content)
             return json_loads(data)
         request_kwargs.setdefault("parse", parse_upload_init_response)
         return self.request(url=api, method="POST", async_=async_, **request_kwargs)
@@ -25295,6 +25314,20 @@ class P115Client(P115OpenClient):
             payload = {"pickcode": payload}
         else:
             payload = dict(payload)
+            if "pickcode" not in payload:
+                if "pick_code" in payload:
+                    payload["pickcode"] = payload["pick_code"]
+            callback_var: None | dict = None
+            if "callback_var" in payload:
+                callback_var = loads(payload["callback_var"])
+            elif "callback" in payload:
+                callback_var = loads(payload["callback"]["callback_var"])
+            if callback_var:
+                payload.update(
+                    pickcode=callback_var["x:pick_code"], 
+                    target=callback_var["x:target"], 
+                    userid=callback_var["x:user_id"], 
+                )
         payload.setdefault("fileid", "0" * 40)
         payload.setdefault("filesize", 1)
         payload.setdefault("target", "U_1_0")
@@ -25588,6 +25621,7 @@ class P115Client(P115OpenClient):
         filename: str = "", 
         dirname: str = "", 
         pid: int | str = 0, 
+        filesize: int = -1, 
         base_url: str | Callable[[], str] = "https://uplb.115.com", 
         *, 
         async_: Literal[False] = False, 
@@ -25601,6 +25635,7 @@ class P115Client(P115OpenClient):
         filename: str = "", 
         dirname: str = "", 
         pid: int | str = 0, 
+        filesize: int = -1, 
         base_url: str | Callable[[], str] = "https://uplb.115.com", 
         *, 
         async_: Literal[True], 
@@ -25613,6 +25648,7 @@ class P115Client(P115OpenClient):
         filename: str = "", 
         dirname: str = "", 
         pid: int | str = 0, 
+        filesize: int = -1, 
         base_url: str | Callable[[], str] = "https://uplb.115.com", 
         *, 
         async_: Literal[False, True] = False, 
@@ -25623,6 +25659,7 @@ class P115Client(P115OpenClient):
         :param filename: 文件名，默认为一个新的 uuid4 对象的字符串表示
         :param dirname: 保存目录，是在 `pid` 对应目录下的相对路径，默认为 `pid` 所对应目录本身
         :param pid: 上传文件到此目录的 id 或 pickcode，或者指定的 target（格式为 f"U_{aid}_{pid}"）
+        :param filesize: 文件大小，⚠️ 此参数可以省略
         :param base_url: 接口的基地址
         :param async_: 是否异步
         :param request_kwargs: 其它请求参数
@@ -25631,7 +25668,9 @@ class P115Client(P115OpenClient):
             target = pid
         else:
             target = f"U_1_{pid}"
-        payload = {"filename": filename or str(uuid4()), "path": dirname, "target": target}
+        payload: dict = {"filename": filename or str(uuid4()), "path": dirname, "target": target}
+        if filesize >= 0:
+            payload["filesize"] = filesize
         return self.upload_sample_init(payload, async_=async_, base_url=base_url, **request_kwargs)
 
     @overload # type: ignore
@@ -25888,7 +25927,6 @@ class P115Client(P115OpenClient):
                     path = cast(str, path)
                     if is_url:
                         if async_:
-                            from httpfile import AsyncHTTPFileReader
                             async def process():
                                 return await AsyncHTTPFileReader.new(
                                     cast(str, path), 
@@ -25954,6 +25992,7 @@ class P115Client(P115OpenClient):
                 SupportsRead | Iterable[Buffer] ), 
         pid: int | str = 0, 
         filename: str = "", 
+        filesize: int = -1, 
         dirname: str = "", 
         *, 
         async_: Literal[False] = False, 
@@ -25968,6 +26007,7 @@ class P115Client(P115OpenClient):
                 SupportsRead | Iterable[Buffer] | AsyncIterable[Buffer] ), 
         pid: int | str = 0, 
         filename: str = "", 
+        filesize: int = -1, 
         dirname: str = "", 
         *, 
         async_: Literal[True], 
@@ -25981,6 +26021,7 @@ class P115Client(P115OpenClient):
                 SupportsRead | Iterable[Buffer] | AsyncIterable[Buffer] ), 
         pid: int | str = 0, 
         filename: str = "", 
+        filesize: int = -1, 
         dirname: str = "", 
         *, 
         async_: Literal[False, True] = False, 
@@ -26013,6 +26054,7 @@ class P115Client(P115OpenClient):
         :param file: 待上传的文件
         :param pid: 上传文件到此目录的 id 或 pickcode，或者指定的 target（格式为 f"U_{aid}_{pid}"）
         :param filename: 文件名，如果为空，则会自动确定
+        :param filesize: 文件大小，⚠️ 此参数可以省略
         :param dirname: 保存目录，是在 `pid` 对应目录下的相对路径，默认为 `pid` 所对应目录本身
         :param async_: 是否异步
         :param request_kwargs: 其余请求参数
@@ -26023,7 +26065,12 @@ class P115Client(P115OpenClient):
             pid = self.to_id(pid)
         def gen_step():
             nonlocal file, filename
-            if not isinstance(file, (Buffer, SupportsRead)):
+            if isinstance(file, SupportsRead):
+                if not filename:
+                    from os.path import basename
+                    filename = getattr(file, "name", "")
+                    filename = basename(filename)
+            elif not isinstance(file, Buffer):
                 path = file
                 is_url: None | bool = None
                 if isinstance(path, str):
@@ -26041,7 +26088,6 @@ class P115Client(P115OpenClient):
                     path = cast(str, path)
                     if is_url:
                         if async_:
-                            from httpfile import AsyncHTTPFileReader
                             async def process():
                                 return await AsyncHTTPFileReader.new(
                                     cast(str, path), 
@@ -26065,15 +26111,11 @@ class P115Client(P115OpenClient):
                         else:
                             from os.path import basename
                             filename = basename(path)
-                elif isinstance(file, SupportsRead):
-                    if not filename:
-                        from os.path import basename
-                        filename = getattr(file, "name", "")
-                        filename = basename(filename)
             resp = yield self.upload_file_sample_init(
                 filename, 
                 dirname=dirname, 
                 pid=pid, 
+                filesize=filesize, 
                 async_=async_, 
                 **request_kwargs, 
             )

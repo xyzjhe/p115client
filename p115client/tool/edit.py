@@ -145,7 +145,7 @@ def update_desc(
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
     """
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         method = "fs_desc_set"
     else:
         method = "fs_desc_set_app"
@@ -220,7 +220,7 @@ def update_star(
         client = P115Client(client, check_for_relogin=True)
     if not isinstance(client, P115Client) or app == "open":
         method = "fs_star_set_open"
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         method = "fs_star_set"
     else:
         method = "fs_star_set_app"
@@ -288,7 +288,7 @@ def update_label(
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
     """
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         method = "fs_label_set"
     else:
         method = "fs_label_set_app"
@@ -474,7 +474,7 @@ def update_show_play_long(
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
     """
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         method = "fs_show_play_long_set"
     else:
         method = "fs_show_play_long_set_app"
@@ -686,7 +686,7 @@ def update_name(
     """
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         method: Callable = client.fs_rename
     else:
         method = client.fs_rename_app
@@ -933,7 +933,7 @@ def copyfile(
     else:
         get_url = client.download_url
         upload_file_init = client.upload_file_init
-        if app in ("", "web", "desktop", "harmony"):
+        if app in ("", "web", "desktop", "aps"):
             fs_copy = client.fs_copy
         else:
             if isinstance(id, Mapping):
@@ -1055,7 +1055,7 @@ def renamefile(
     else:
         get_url = client.download_url
         upload_file_init = client.upload_file_init
-        if app in ("", "web", "desktop", "harmony"):
+        if app in ("", "web", "desktop", "aps"):
             fs_move = client.fs_move
             fs_delete = client.fs_delete
             fs_rename = client.fs_rename

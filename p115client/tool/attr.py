@@ -9,19 +9,21 @@ __all__ = [
     "get_ancestors", "get_path", "get_id", "get_id_to_path", 
     "get_id_to_sha1", "get_id_to_name", "share_get_id", 
     "share_get_id_to_path", "share_get_id_to_name", "get_file_count", 
+    "get_url", 
 ]
 __doc__ = "这个模块提供了一些和文件或目录信息有关的函数"
 
+from base64 import b32decode
 from collections.abc import (
     AsyncIterator, Callable, Coroutine, Iterable, Iterator, 
     Mapping, MutableMapping, Sequence, 
 )
 from functools import partial
-from itertools import cycle, dropwhile
+from itertools import dropwhile
 from operator import attrgetter
 from os import PathLike
 from types import EllipsisType
-from typing import cast, overload, Any, Final, Literal
+from typing import cast, overload, Any, Literal
 
 from dictattr import AttrDict
 from dicttools import get_first
@@ -34,7 +36,7 @@ from posixpatht import path_is_dir_form, splitext, splits
 from ..client import check_response, P115Client, P115OpenClient
 from ..const import CLASS_TO_TYPE, SUFFIX_TO_TYPE, ID_TO_DIRNODE_CACHE
 from ..exception import throw
-from ..type import P115ID
+from ..type import P115ID, P115URL
 from ..util import (
     posix_escape_name, share_extract_payload, unescape_115_charref, 
     is_valid_id, is_valid_sha1, is_valid_name, is_valid_pickcode, 
@@ -802,7 +804,7 @@ def get_info(
                 async_=async_, 
                 **request_kwargs, 
             )
-        elif app in ("", "web", "desktop", "harmony", "aps"):
+        elif app in ("", "web", "desktop", "aps"):
             resp = yield client.fs_category_get(
                 id, 
                 async_=async_, 
@@ -1175,7 +1177,7 @@ def get_path(
 @overload
 def get_id(
     client: str | PathLike | P115Client | P115OpenClient, 
-    id: int = -1, 
+    id: int | str | Sequence[str] | Mapping = -1, 
     pickcode: str = "", 
     sha1: str = "", 
     name: str = "", 
@@ -1197,7 +1199,7 @@ def get_id(
 @overload
 def get_id(
     client: str | PathLike | P115Client | P115OpenClient, 
-    id: int = -1, 
+    id: int | str | Sequence[str] | Mapping = -1, 
     pickcode: str = "", 
     sha1: str = "", 
     name: str = "", 
@@ -1218,7 +1220,7 @@ def get_id(
     ...
 def get_id(
     client: str | PathLike | P115Client | P115OpenClient, 
-    id: int = -1, 
+    id: int | str | Sequence[str] | Mapping = -1, 
     pickcode: str = "", 
     sha1: str = "", 
     name: str = "", 
@@ -1242,9 +1244,9 @@ def get_id(
         优先级，``id > pickcode > name > path > value``
 
     :param client: 115 客户端或 cookies
-    :param id: id
+    :param id: id 或某种可借以取得 id 的信息
     :param pickcode: 提取码
-    :param sha1: 文件的 sha1 散列值
+    :param sha1: 文件的 sha1 散列值（hex 或 base32 编码）
     :param name: 名称
     :param path: 路径
     :param value: 当 ``id``、``pickcode``、``name`` 和 ``path`` 不可用时生效，将会自动决定所属类型
@@ -1266,9 +1268,24 @@ def get_id(
 
     :return: 文件或目录的 id
     """
-    if id >= 0:
-        if id or not ensure_file:
-            return id
+    if id != -1:
+        if isinstance(id, int):
+            if id > 0 or not ensure_file:
+                return id
+        elif isinstance(id, (str, Sequence)):
+            value = id
+        else:
+            attr = id
+            if "id" in attr:
+                return int(attr["id"])
+            if "pickcode" in attr:
+                pickcode = attr["pickcode"]
+            if "path" in attr:
+                path = attr["path"]
+            if "sha1" in attr:
+                sha1 = attr["sha1"]
+            if "size" in attr:
+                size = attr["size"]
     if pickcode:
         return to_id(pickcode)
     elif sha1:
@@ -1499,7 +1516,7 @@ def get_id_to_path(
                     stop += 1
             if not dont_use_getid:
                 while stop > i:
-                    if app in ("", "web", "desktop", "harmony", "aps"):
+                    if app in ("", "web", "desktop", "aps"):
                         fs_dir_getid: Callable = client.fs_dir_getid
                     else:
                         fs_dir_getid = partial(client.fs_dir_getid_app, app=app)
@@ -1596,7 +1613,7 @@ def get_id_to_sha1(
         这个函数并不会检查输入的 ``sha1`` 是否合法
 
     :param client: 115 客户端或 cookies
-    :param sha1: 文件的 sha1 哈希值
+    :param sha1: 文件的 sha1 哈希值（hex 或 base32 编码）
     :param size: 文件大小
     :param cid: 顶层目录 id
     :param app: 使用指定 app（设备）的接口
@@ -1605,6 +1622,8 @@ def get_id_to_sha1(
 
     :return: 文件或目录的 id
     """
+    if len(sha1) == 32:
+        sha1 = b32decode(sha1).hex()
     sha1 = sha1.upper()
     assert size or sha1 == "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"
     if isinstance(client, (str, PathLike)):
@@ -1613,7 +1632,7 @@ def get_id_to_sha1(
         search: None | Callable = None
         if not isinstance(client, P115Client) or app == "open":
             search = client.fs_search_open
-        elif app in ("", "web", "desktop", "harmony", "aps"):
+        elif app in ("", "web", "desktop", "aps"):
             if not cid and size < 0:
                 resp: dict = yield client.fs_shasearch(sha1, async_=async_, **request_kwargs)
                 check_response(resp)
@@ -1707,7 +1726,7 @@ def get_id_to_name(
     def gen_step():
         if not isinstance(client, P115Client) or app == "open":
             search: Callable = client.fs_search_open
-        elif app in ("", "web", "desktop", "harmony", "aps"):
+        elif app in ("", "web", "desktop", "aps"):
             search = client.fs_search
         else:
             search = partial(client.fs_search_app, app=app)
@@ -1743,7 +1762,7 @@ def share_get_id(
     client: str | PathLike | P115Client, 
     share_code: str, 
     receive_code: str = "", 
-    id: int = -1, 
+    id: int | str | Sequence[str] | Mapping = -1, 
     name: str = "", 
     path: str | Sequence[str] = "", 
     value: int | str | Sequence[str] = "", 
@@ -1763,7 +1782,7 @@ def share_get_id(
     client: str | PathLike | P115Client, 
     share_code: str, 
     receive_code: str = "", 
-    id: int = -1, 
+    id: int | str | Sequence[str] | Mapping = -1, 
     name: str = "", 
     path: str | Sequence[str] = "", 
     value: int | str | Sequence[str] = "", 
@@ -1782,7 +1801,7 @@ def share_get_id(
     client: str | PathLike | P115Client, 
     share_code: str, 
     receive_code: str = "", 
-    id: int = -1, 
+    id: int | str | Sequence[str] | Mapping = -1, 
     name: str = "", 
     path: str | Sequence[str] = "", 
     value: int | str | Sequence[str] = "", 
@@ -1824,9 +1843,20 @@ def share_get_id(
 
     :return: 文件或目录的 id
     """
-    if id >= 0:
-        if id or not ensure_file:
-            return id
+    if id != -1:
+        if isinstance(id, int):
+            if id > 0 or not ensure_file:
+                return id
+        elif isinstance(id, (str, Sequence)):
+            value = id
+        else:
+            attr = id
+            if "id" in attr:
+                id = attr["id"]
+            if "path" in attr:
+                path = attr["path"]
+            if "size" in attr:
+                size = attr["size"]
     if name:
         return share_get_id_to_name(
             client, 
@@ -2239,5 +2269,152 @@ def get_file_count(
                 resp["cid"] = cid
                 raise NotADirectoryError(errno.ENOTDIR, resp)
             return int(resp["count"])
+    return run_gen_step(gen_step, async_)
+
+
+@overload
+def get_url(
+    client, 
+    value, 
+    /, 
+    size: int = -1, 
+    share_code: str = "", 
+    receive_code: str = "", 
+    cid: int = 0, 
+    user_agent: str = "", 
+    is_posixpath: bool = False, 
+    refresh: bool = False, 
+    id_to_dirnode: EllipsisType | MutableMapping[int, tuple[str, int]] | None = None, 
+    app: str = "android", 
+    *, 
+    async_: Literal[False] = False, 
+    **request_kwargs, 
+) -> P115URL:
+    ...
+@overload
+def get_url(
+    client, 
+    value, 
+    /, 
+    size: int = -1, 
+    share_code: str = "", 
+    receive_code: str = "", 
+    cid: int = 0, 
+    user_agent: str = "", 
+    is_posixpath: bool = False, 
+    refresh: bool = False, 
+    id_to_dirnode: EllipsisType | MutableMapping[int, tuple[str, int]] | None = None, 
+    app: str = "android", 
+    *, 
+    async_: Literal[True], 
+    **request_kwargs, 
+) -> Coroutine[Any, Any, P115URL]:
+    ...
+def get_url(
+    client, 
+    value, 
+    /, 
+    size: int = -1, 
+    share_code: str = "", 
+    receive_code: str = "", 
+    cid: int = 0, 
+    user_agent: str = "", 
+    is_posixpath: bool = False, 
+    refresh: bool = False, 
+    id_to_dirnode: EllipsisType | MutableMapping[int, tuple[str, int]] | None = None, 
+    app: str = "android", 
+    *, 
+    async_: Literal[False, True] = False, 
+    **request_kwargs, 
+) -> P115URL | Coroutine[Any, Any, P115URL]:
+    """获取文件的下载链接
+
+    :param client: 115 客户端或 cookies
+    :param value: 文件的 id, pickcode, sha1, path, name 其一
+    :param size: 文件的大小，用于辅助判断
+    :param share_code: 分享码或链接
+    :param receive_code: 接收码
+    :param cid: 文件所在目录，用于辅助判断
+    :param user_agent: 下载链接的请求头中的 User-Agent
+    :param is_posixpath: 使用 posixpath，会把 "/" 转换为 "|"，因此解析的时候，会对 "|" 进行特别处理
+    :param refresh: 是否刷新。如果为 True，则会执行网络请求以查询；如果为 False，则直接从 `id_to_dirnode` 中获取
+    :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典    
+    :param app: 使用指定 app（设备）的接口
+    :param async_: 是否异步
+    :param request_kwargs: 其它请求参数
+
+    :return: 文件的下载链接
+    """
+    if not isinstance(client, (P115Client, P115OpenClient)):
+        client = P115Client(client, check_for_relogin=True)
+    if share_code:
+        def gen_step():
+            assert isinstance(client, P115Client)
+            payload = dict(share_extract_payload(share_code))
+            if receive_code:
+                payload["receive_code"] = receive_code
+            elif "receive_code" not in payload:
+                resp = yield client.share_info(
+                    share_code, 
+                    async_=async_, 
+                    **request_kwargs, 
+                )
+                check_response(resp)
+                payload["receive_code"] = resp["data"]["receive_code"]
+            payload["file_id"] = yield share_get_id(
+                client, 
+                value=value, 
+                **payload, 
+                size=size, 
+                cid=cid, 
+                ensure_file=True, 
+                is_posixpath=is_posixpath, 
+                id_to_dirnode=id_to_dirnode, 
+                refresh=refresh, 
+                async_=async_, # type: ignore
+                **request_kwargs, 
+            )
+            return client.share_download_url(
+                payload, 
+                async_=async_, 
+                **request_kwargs, 
+            )
+    else:
+        def gen_step():
+            if (isinstance(client, P115Client) 
+                and 0 <= size <= 1024 * 1024 * 50 
+                and is_valid_sha1(value)
+            ):
+                from .download import get_pic_url
+                return get_pic_url(
+                    client, 
+                    value if size else "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709", 
+                    async_=async_, 
+                    **request_kwargs, 
+                )
+            pickcode = client.to_pickcode((yield get_id(
+                client, 
+                value=value, 
+                size=size, 
+                cid=cid, 
+                ensure_file=True, 
+                is_posixpath=is_posixpath, 
+                id_to_dirnode=id_to_dirnode, 
+                refresh=refresh, 
+                app=app, 
+                async_=async_, 
+                **request_kwargs, 
+            )))
+            if app == "open" or not isinstance(client, P115Client):
+                geturl = client.download_url_open
+            else:
+                geturl = client.download_url
+            return geturl(
+                pickcode, 
+                user_agent=user_agent, 
+                app=app, 
+                async_=async_, 
+                **request_kwargs, 
+            )
     return run_gen_step(gen_step, async_)
 

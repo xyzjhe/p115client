@@ -15,6 +15,7 @@ from asyncio import (
     CancelledError as AsyncCancelledError, 
     Queue as AsyncQueue, TaskGroup, 
 )
+from base64 import b32decode
 from collections import defaultdict
 from collections.abc import (
     AsyncIterable, AsyncIterator, Buffer, Callable, Coroutine, 
@@ -34,7 +35,7 @@ from os.path import abspath, dirname, join as joinpath, normpath, splitext, gets
 from queue import SimpleQueue
 from re import compile as re_compile
 from sqlite3 import Connection, Cursor
-from string import hexdigits
+from string import hexdigits, ascii_uppercase
 from sys import exc_info
 from threading import Lock
 from time import time
@@ -132,7 +133,9 @@ def get_pic_url(
     :return: 图片链接的单个或列表
     """
     def formalize_sha1(sha1):
-        if len(sha1) == 40 and not sha1.strip(hexdigits):
+        if len(sha1) and not sha1.upper().lstrip(ascii_uppercase):
+            return b32decode(sha1).hex().upper()
+        elif len(sha1) == 40 and not sha1.lstrip(hexdigits):
             return sha1.upper()
         elif not _match_fhn_prefix(sha1):
             return "fhnfile_" + sha1
@@ -422,7 +425,7 @@ def iter_files_with_url(
     )
     if not isinstance(client, P115Client) or app == "open":
         get_url: Callable[..., P115URL] = client.download_url_open
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         get_url = client.download_url
     else:
         get_url = partial(client.download_url, app=app)
@@ -585,7 +588,7 @@ def iter_images_with_url(
     )
     if not isinstance(client, P115Client) or app == "open":
         get_url: Callable[..., P115URL] = client.download_url_open
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         get_url = client.download_url
     else:
         get_url = partial(client.download_url, app=app)
@@ -743,7 +746,7 @@ def iter_subtitles_with_url(
         fs_copy: Callable = client.fs_copy_open
         fs_delete: Callable = client.fs_delete_open
         fs_video_subtitle: Callable = client.fs_video_subtitle_open
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         get_url = client.download_url
         fs_mkdir = client.fs_mkdir
         fs_copy = client.fs_copy
@@ -909,7 +912,7 @@ def iter_subtitle_batches(
         fs_copy: Callable = client.fs_copy_open
         fs_delete: Callable = client.fs_delete_open
         fs_video_subtitle: Callable = client.fs_video_subtitle_open
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         fs_mkdir = client.fs_mkdir
         fs_copy = client.fs_copy
         fs_delete = client.fs_delete
@@ -1976,7 +1979,7 @@ def get_remaining_open_count(
         client = P115Client(client, check_for_relogin=True)
     if not isinstance(client, P115Client) or app == "open":
         get_url: Callable[..., P115URL] = client.download_url_open
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         get_url = client.download_url
     else:
         get_url = partial(client.download_url, app=app)
@@ -2026,7 +2029,7 @@ def get_remaining_open_count(
 def download_file(
     client: str | PathLike | P115Client | P115OpenClient, 
     fid: int | str | Mapping, 
-    path: str, 
+    path: str = "", 
     resume: bool = True, 
     reporthook: None | Callable[[int], Any] = None, 
     *, 
@@ -2037,7 +2040,7 @@ def download_file(
 
     :param client: 115 客户端或 cookies
     :param fid: 待下载文件的 id、pickcode 或者信息字典
-    :param path: 下载到本地路径
+    :param path: 下载到本地路径，如果不提供或者以 "/" 结尾，则用网盘上的名字
     :param resume: 是否断点续传
     :param reporthook: 用于更新进度条
     :param async_: 是否异步
@@ -2095,7 +2098,25 @@ def download_file(
         pickcode = client.to_pickcode(fid)
         fid = client.to_id(fid)
     def gen_step():
-        nonlocal attr, resume
+        nonlocal attr, path, resume
+        if not path or path.endswith("/"):
+            if not attr or "name" not in attr:
+                if isinstance(client, P115Client):
+                    attr = yield get_attr(
+                        client, 
+                        fid, 
+                        skim=True, 
+                        async_=async_, 
+                        **request_kwargs, 
+                    )
+                else:
+                    attr = yield get_info(
+                        client, 
+                        fid, 
+                        async_=async_, 
+                        **request_kwargs, 
+                    )
+            path += attr["name"].replace("/", ":")
         start = 0
         try:
             if resume:

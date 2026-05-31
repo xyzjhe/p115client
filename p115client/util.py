@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager, AbstractAsyncContextManager
 from http import HTTPStatus
 from inspect import isawaitable, iscoroutinefunction
 from re import compile as re_compile
-from string import digits, hexdigits
+from string import ascii_uppercase, digits, hexdigits
 from typing import (
     cast, overload, Any, AsyncContextManager, ContextManager, Final, 
     Literal, NotRequired, TypedDict, 
@@ -110,12 +110,20 @@ def complete_url(
     if app in ("windows", "mac", "linux"):
         app = "os_" + app
     if app and not path.startswith("/open/"):
-        if app not in frozenset((
+        if app in (
             "ios", "115ios", "ipad", "115ipad", 
-            "android", "115android", "qandroid", "qios", 
+            "android", "115android", "harmony", 
             "wechatmini", "alipaymini", "tv", "apple_tv", 
             "os_windows", "os_mac", "os_linux", 
-        )):
+        ):
+            pass
+        elif app.endswith("ios"):
+            app = "ios"
+        elif app.endswith("ipad"):
+            app = "ipad"
+        elif app.endswith("android"):
+            app = "android"
+        else:
             app = "android"
         path = "/" + app + path
     url = base_url
@@ -339,8 +347,12 @@ def is_valid_id(id: int | str, /) -> bool:
     return len(id) > 0 and not (id.startswith("0") or id.strip(digits))
 
 
-def is_valid_sha1(sha1: str, /) -> bool:
-    return len(sha1) == 40 and not sha1.strip(hexdigits)
+def is_valid_sha1(sha1, /) -> bool:
+    if not isinstance(sha1, str):
+        return False
+    if len(sha1) == 32:
+        return not sha1.upper().lstrip(ascii_uppercase+"234567")
+    return len(sha1) == 40 and not sha1.lstrip(hexdigits)
 
 
 def is_valid_name(name: str, /) -> bool:

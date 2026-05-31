@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 # encoding: utf-8
 
-__author__ = "ChenyangGao <https://chenyanggao.github.io>"
-__all__ = [
-    "rsa_encrypt_with_pubkey", "rsa_decrypt_with_pubkey", 
-    "generate_ecdh_pair", "xor", 
-]
+from collections.abc import Callable, Iterator
 
-from collections.abc import Buffer, Iterator
-from typing import Final, Literal
+from typing_extensions import Buffer, Final, Literal
 
 
 G_kts: Final = bytes((
@@ -36,6 +31,180 @@ RSA_PUBKEY_PAIR: Final = (
 
 from_bytes = int.from_bytes
 to_bytes   = int.to_bytes
+
+
+def _pad(data, /):
+    if not isinstance(data, (bytes, bytearray)):
+        data = bytes(data)
+    if pad_size := -len(data) & 15:
+        return data + bytes((pad_size,) * pad_size)
+    return data
+
+
+def _unpad(data, /):
+    view = memoryview(data)
+    if 0 < (pad_size := view[-1]) < 16 and all(c == pad_size for c in view[-pad_size:]):
+        return view[:-pad_size].tobytes()
+    return data
+
+
+aes_cbc_encrypt: Callable[[Buffer, bytes, bytes], bytes]
+aes_cbc_decrypt: Callable[[Buffer, bytes, bytes], bytes]
+try:
+    from Crypto.Cipher import AES
+
+    def aes_cbc_encrypt(data, aes_key, aes_iv):
+        return AES.new(aes_key, AES.MODE_CBC, aes_iv).encrypt(_pad(data))
+
+    def aes_cbc_decrypt(cipher_data, aes_key, aes_iv):
+        view = memoryview(cipher_data)
+        return _unpad(AES.new(aes_key, AES.MODE_CBC, aes_iv).decrypt(
+            view[:len(view) & -16]))
+except ImportError:
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        def aes_cbc_encrypt(data, aes_key, aes_iv):
+            cipher = Cipher(algorithms.AES(aes_key), modes.CBC(aes_iv))
+            encryptor = cipher.encryptor()
+            return encryptor.update(_pad(data)) + encryptor.finalize()
+
+        def aes_cbc_decrypt(cipher_data, aes_key, aes_iv):
+            cipher = Cipher(algorithms.AES(aes_key), modes.CBC(aes_iv))
+            decryptor = cipher.decryptor()
+            return _unpad(decryptor.update(cipher_data) + decryptor.finalize())
+    except ImportError:
+        from shutil import which
+
+        if which("openssl"):
+            from subprocess import check_output
+
+            def aes_cbc_encrypt(data, aes_key, aes_iv):
+                return check_output(
+                    [
+                        "openssl", "enc", "-aes-128-cbc", "-e",
+                        "-K", aes_key.hex(), 
+                        "-iv", aes_iv.hex(), 
+                        "-nosalt"
+                    ], 
+                    input=data, 
+                )
+
+            def aes_cbc_decrypt(cipher_data, aes_key, aes_iv):
+                return check_output(
+                    [
+                        "openssl", "enc", "-aes-128-cbc", "-d",
+                        "-K", aes_key.hex(), 
+                        "-iv", aes_iv.hex(), 
+                        "-nosalt"
+                    ], 
+                    input=cipher_data,
+                )
+        else:
+            from .aes import AES as AES_
+
+            def aes_cbc_encrypt(data, aes_key, aes_iv):
+                encrypt = AES_(aes_key).encrypt
+                view = memoryview(_pad(data))
+                b = bytearray()
+                puts = b.extend
+                last_cipher = aes_iv
+                for i in range(0, len(view), 16):
+                    last_cipher = encrypt([(p ^ l) for (p, l) in zip(view[i:i+16], last_cipher)])
+                    puts(last_cipher)
+                return b
+
+            def aes_cbc_decrypt(cipher_data, aes_key, aes_iv):
+                decrypt = AES_(aes_key).decrypt
+                view = memoryview(cipher_data)
+                b = bytearray()
+                puts = b.extend
+                last_cipher = aes_iv
+                for i in range(0, len(view), 16):
+                    puts(p ^ l for (p, l) in zip(decrypt(view[i:i+16]), last_cipher))
+                    last_cipher = view[i:i+16]
+                return _unpad(b)
+
+
+lz4_block_decompress: Callable[[Buffer, int], bytes]
+try:
+    from lz4.block import decompress as lz4_block_decompress # type: ignore
+except ImportError:
+    from ctypes.util import find_library
+
+    if lz4_path := find_library("lz4"):
+        import ctypes
+        from ctypes import create_string_buffer
+
+        _lz4 = ctypes.CDLL(lz4_path)
+        LZ4_decompress_safe = _lz4.LZ4_decompress_safe
+        LZ4_decompress_safe.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+        LZ4_decompress_safe.restype = ctypes.c_int
+
+        def lz4_block_decompress(source, uncompressed_size):
+            dst_buf = create_string_buffer(uncompressed_size)
+            result = LZ4_decompress_safe(
+                bytes(source), 
+                dst_buf, 
+                len(source), 
+                uncompressed_size, 
+            )
+            if result < 0:
+                raise ValueError("LZ4 decompression failed")
+            return dst_buf.raw[:result]
+    else:
+        def lz4_block_decompress(source, uncompressed_size=-1):
+            src = memoryview(source)
+            src_len = len(source)
+            src_ptr = 0
+            dest = bytearray()
+            dest_extend = dest.extend
+            while src_ptr < src_len:
+                token = src[src_ptr]
+                src_ptr += 1
+                lit_len = token >> 4
+                if lit_len == 15:
+                    start_ptr = src_ptr
+                    try:
+                        while src[src_ptr] == 255:
+                            src_ptr += 1
+                        lit_len += (src_ptr - start_ptr) * 255 + src[src_ptr]
+                        src_ptr += 1
+                    except IndexError:
+                        pass
+                if lit_len:
+                    dest_extend(src[src_ptr:src_ptr + lit_len])
+                    src_ptr += lit_len
+                if src_ptr >= src_len:
+                    break
+                offset = src[src_ptr] | (src[src_ptr + 1] << 8)
+                src_ptr += 2
+                match_len = token & 0x0F
+                if match_len == 15:
+                    start_ptr = src_ptr
+                    try:
+                        while src[src_ptr] == 255:
+                            src_ptr += 1
+                        match_len += (src_ptr - start_ptr) * 255 + src[src_ptr]
+                        src_ptr += 1
+                    except IndexError:
+                        pass
+                match_len += 4
+                dest_ptr = len(dest)
+                match_pos = dest_ptr - offset
+                if offset >= match_len:
+                    dest_extend(dest[match_pos:match_pos + match_len])
+                else:
+                    if offset == 1:
+                        dest_extend((dest[match_pos],) * match_len)
+                    else:
+                        end_ptr = dest_ptr + match_len
+                        while dest_ptr < end_ptr:
+                            copy_size = offset if offset < (end_ptr - dest_ptr) else (end_ptr - dest_ptr)
+                            dest_extend(dest[match_pos:match_pos + copy_size])
+                            dest_ptr += copy_size
+                            offset += offset
+            return dest
 
 
 def acc_step(
@@ -151,5 +320,14 @@ def rsa_decrypt_with_pubkey(cipher_data: Buffer, /) -> bytearray:
         p = pow(from_bytes(view[l:r]), RSA_PUBKEY_PAIR[1], RSA_PUBKEY_PAIR[0])
         b = to_bytes(p, (p.bit_length() + 0b111) >> 3)
         data += memoryview(b)[b.index(0)+1:]
+    return data
+
+
+def lz4_decompress(source: Buffer, /) -> bytes:
+    src = memoryview(source)
+    data = b""
+    while src and (src_len := (src[0] + (src[1] << 8))):
+        data += lz4_block_decompress(src[2:src_len+2], 0x2000)
+        src = src[src_len+2:]
     return data
 

@@ -108,7 +108,7 @@ def iter_history_once(
     """
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         history_list = partial(client.fs_history_list, **request_kwargs)
     else:
         history_list = partial(client.fs_history_list_app, app=app, **request_kwargs)

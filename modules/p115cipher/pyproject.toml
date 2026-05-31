@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "p115cipher"
-version = "0.0.4"
+version = "0.0.5.2"
 description = "115 cipher module."
 authors = ["ChenyangGao <wosiwujm@gmail.com>"]
 license = "MIT"
@@ -13,7 +13,6 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3 :: Only",
     "Operating System :: OS Independent",
     "Intended Audience :: Developers",
@@ -26,9 +25,14 @@ include = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.12"
-lz4 = "*"
-pycryptodome = "*"
+python = "^3"
+typing_extensions = ">=4.15.0"
+ecdsa = { version = "*", optional = true }
+lz4 = { version = "*", optional = true }
+pycryptodome = { version = "*", optional = true }
+
+[tool.poetry.extras]
+full = ["ecdsa", "lz4", "pycryptodome"]
 
 [build-system]
 requires = ["poetry-core"]

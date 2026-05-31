@@ -50,7 +50,7 @@ def make_application(
     middleware_access_log(app)
 
     @app.router.route("/<path:path>", methods=["GET"])
-    async def downlaod(path: str):
+    async def download(path: str):
         key = path.lstrip("/").split("/", 1)[0]
         if not key or key.lstrip(LETTERS):
             raise ValueError("please pass `id`, `pickcode`, `sha1` or `oss`")

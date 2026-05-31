@@ -19,3 +19,6 @@ from .pool import *
 from .updatedb import *
 from .upload import *
 from .xys import *
+
+# TODO: 各种接口，除了能接受 id、pickcode、path，也能接受 attr（mapping）
+

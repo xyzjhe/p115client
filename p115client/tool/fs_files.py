@@ -203,7 +203,7 @@ def iter_fs_files_serialized(
     if not isinstance(client, P115Client) or app == "open":
         page_size = min(page_size, 1150)
         fs_files = client.fs_files_open
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         page_size = min(page_size, 1150)
         request_kwargs.setdefault("base_url", get_webapi_origin)
         fs_files = client.fs_files
@@ -310,7 +310,7 @@ def iter_fs_files_threaded(
     if not isinstance(client, P115Client) or app == "open":
         page_size = min(page_size, 1150)
         fs_files = client.fs_files_open
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         page_size = min(page_size, 1150)
         request_kwargs.setdefault("base_url", get_webapi_origin)
         fs_files = client.fs_files
@@ -445,7 +445,7 @@ async def iter_fs_files_asynchronized(
     if not isinstance(client, P115Client) or app == "open":
         page_size = min(page_size, 1150)
         fs_files = client.fs_files_open
-    elif app in ("", "web", "desktop", "harmony"):
+    elif app in ("", "web", "desktop", "aps"):
         page_size = min(page_size, 1150)
         request_kwargs.setdefault("base_url", get_webapi_origin)
         fs_files = client.fs_files

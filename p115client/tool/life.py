@@ -251,7 +251,7 @@ def iter_life_behavior_once(
     """
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
-    if app in ("", "web", "desktop", "harmony"):
+    if app in ("", "web", "desktop", "aps"):
         life_behavior_detail = partial(client.life_behavior_detail, **request_kwargs)
     else:
         life_behavior_detail = partial(client.life_behavior_detail_app, app=app, **request_kwargs)
