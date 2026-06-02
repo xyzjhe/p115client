@@ -128,12 +128,12 @@ def json_loads(content: Buffer, /):
 def default_parse(_, content: Buffer, /):
     if not isinstance(content, (bytes, bytearray, memoryview)):
         content = memoryview(content)
-    if content and content[0] + content[-1] not in (b"{}", b"[]", b'""'):
+    if len(content) > 2 and bytes((content[0], content[-1])) not in (b"{}", b"[]", b'""'):
         try:
             content = ecdh_aes_decrypt(content)
         except Exception:
             pass
-    return json_loads(memoryview(content))
+    return json_loads(content)
 
 
 def md5_secret_password(password: None | int | str = "670b14728ad9902aecba32e22fa4f6bd", /) -> str:
