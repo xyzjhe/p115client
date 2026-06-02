@@ -149,12 +149,13 @@ await client.method(payload, async_=True)
 1. [http_client_request](https://pypi.org/project/http_client_request/)
 1. [httpcore_request](https://pypi.org/project/httpcore_request/)
 1. [httpx_request](https://pypi.org/project/httpx_request/)
-1. [hyper_request](https://pypi.org/project/hyper_request/)
+1. [niquests_request](https://pypi.org/project/niquests_request/)
 1. [pycurl_request](https://pypi.org/project/pycurl_request/)
 1. [python-urlopen](https://pypi.org/project/python-urlopen/)
 1. [requests_request](https://pypi.org/project/requests_request/)
 1. [tornado_client_request](https://pypi.org/project/tornado_client_request/)
 1. [urllib3_request](https://pypi.org/project/urllib3_request/)
+1. [urllib3_future_request](https://pypi.org/project/urllib3_future_request/)
 
 **注意**：从根本上讲，所有接口的封装，最终都会调用 `P115Client.request`
 

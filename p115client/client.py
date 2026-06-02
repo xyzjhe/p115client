@@ -49,7 +49,7 @@ from p115cipher import (
     rsa_encrypt, rsa_decrypt, ecdh_aes_encrypt, ecdh_aes_decrypt, 
     ecdh_encode_token, make_upload_payload, 
 )
-from p115oss import upload
+from p115oss import upload_file
 from p115pickcode import get_stable_point, to_id, to_pickcode
 from property import locked_cacheproperty
 from temporary import temp_globals
@@ -189,7 +189,7 @@ def get_request(
         if request_kwargs:
             request = request_kwargs.pop("request", None)
         if request is None:
-            from httpcore_request import request
+            from urllib3_future_request import request
             request = cast(Callable, request)
         if async_ is not None and not iscoroutinefunction(request) and has_keyword_async(request):
             if request_kwargs is None:
@@ -719,6 +719,18 @@ class ClientRequestMixin:
                 .. code:: python
 
                     from tornado_client_request import request
+
+            14. `urllib3_future_request <https://pypi.org/project/urllib3_future_request/>`_，由 `urllib3.future <https://urllib3future.readthedocs.io/en/latest/>`_ 封装，支持同步和异步请求
+
+                .. code:: python
+
+                    from urllib3_future_request import request
+
+            15. `niquests_request <https://pypi.org/project/niquests_request/>`_，由 `niquests <https://niquests.readthedocs.io/en/latest/>`_ 封装，支持同步和异步请求
+
+                .. code:: python
+
+                    from niquests_request import request
         """
         if payload is not None:
             if method.upper() == "POST":
@@ -3946,7 +3958,7 @@ class P115OpenClient(ClientRequestMixin):
         )
         if isinstance(pid, str) and not pid.startswith("U_"):
             pid = self.to_id(pid)
-        return upload(
+        return upload_file(
             file=file, 
             pid=pid, 
             filename=filename, 
@@ -5307,6 +5319,18 @@ class P115Client(P115OpenClient):
                 .. code:: python
 
                     from tornado_client_request import request
+
+            14. `urllib3_future_request <https://pypi.org/project/urllib3_future_request/>`_，由 `urllib3.future <https://urllib3future.readthedocs.io/en/latest/>`_ 封装，支持同步和异步请求
+
+                .. code:: python
+
+                    from urllib3_future_request import request
+
+            15. `niquests_request <https://pypi.org/project/niquests_request/>`_，由 `niquests <https://niquests.readthedocs.io/en/latest/>`_ 封装，支持同步和异步请求
+
+                .. code:: python
+
+                    from niquests_request import request
         """
         is_open_api = url.startswith("https://proapi.115.com/open/")
         if is_open_api:
@@ -26226,7 +26250,7 @@ class P115Client(P115OpenClient):
         """
         if isinstance(pid, str) and not pid.startswith("U_"):
             pid = self.to_id(pid)
-        return upload(
+        return upload_file(
             file=file, 
             pid=pid, 
             filename=filename, 

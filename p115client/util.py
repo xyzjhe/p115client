@@ -23,9 +23,9 @@ from typing import (
 )
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from httpcore_request import request
 from iterutils import run_gen_step
 from p115pickcode import is_valid_pickcode
+from urllib3_future_request import request
 from yarl import URL
 
 

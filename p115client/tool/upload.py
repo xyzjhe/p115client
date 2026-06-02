@@ -30,7 +30,7 @@ from iterutils import (
     with_iter_next, YieldFrom, 
 )
 from p115oss import (
-    oss_upload_init, oss_multipart_upload_init, oss_multipart_upload_complete, 
+    upload_file_init, oss_multipart_upload_init, oss_multipart_upload_complete, 
     oss_multipart_upload_url, oss_multipart_part_iter, oss_multipart_upload_part_iter, 
 )
 from p115pickcode import to_id
@@ -720,7 +720,7 @@ def upload_init(
     if isinstance(client, (str, PathLike)):
         client = P115Client(client, check_for_relogin=True)
     if isinstance(client, P115Client):
-        return oss_upload_init(
+        return upload_file_init(
             file=file, 
             pid=to_id(pid), 
             filename=filename, 
@@ -737,7 +737,7 @@ def upload_init(
             request_kwargs.get("headers") or (), 
             authorization=client.headers["authorization"], 
         )
-        return oss_upload_init(
+        return upload_file_init(
             file=file, 
             pid=to_id(pid), 
             filename=filename, 
@@ -921,7 +921,7 @@ class P115MultipartUpload:
         """
         def gen_step():
             if user_id and user_key:
-                resp = yield oss_upload_init(
+                resp = yield upload_file_init(
                     file=path, 
                     pid=to_id(pid), 
                     filename=filename, 
@@ -940,7 +940,7 @@ class P115MultipartUpload:
                     raise TypeError(f"{cls.from_path!r} missing 1 required keyword-only argument: 'headers'") from e
                 headers = request_kwargs["headers"] = dict_map(headers or (), key=str.lower)
                 if "authorization" in headers:
-                    resp = yield oss_upload_init(
+                    resp = yield upload_file_init(
                         file=path, 
                         pid=to_id(pid), 
                         filename=filename, 
@@ -952,7 +952,7 @@ class P115MultipartUpload:
                     )
                 elif "cookie" in headers:
                     client = P115Client(headers["cookie"])
-                    resp = yield oss_upload_init(
+                    resp = yield upload_file_init(
                         file=path, 
                         pid=to_id(pid), 
                         filename=filename, 
@@ -1038,8 +1038,8 @@ class P115MultipartUpload:
                 parts = yield self.list_parts(async_=async_, **request_kwargs)
             resp = self._result = yield oss_multipart_upload_complete(
                 self.url, 
-                self.callback, 
-                self.upload_id, 
+                upload_id=self.upload_id, 
+                callback=self.callback, 
                 parts=parts, 
                 async_=async_, 
                 **request_kwargs, 
@@ -1098,7 +1098,7 @@ class P115MultipartUpload:
         *, 
         async_: Literal[False] = False, 
         **request_kwargs, 
-    ) -> tuple[str, dict]:
+    ) -> dict:
         ...
     @overload
     def upload_url(
@@ -1108,7 +1108,7 @@ class P115MultipartUpload:
         *, 
         async_: Literal[True], 
         **request_kwargs, 
-    ) -> Coroutine[Any, Any, tuple[str, dict]]:
+    ) -> Coroutine[Any, Any, dict]:
         ...
     def upload_url(
         self, 
@@ -1117,7 +1117,7 @@ class P115MultipartUpload:
         *, 
         async_: Literal[False, True] = False, 
         **request_kwargs, 
-    ) -> tuple[str, dict] | Coroutine[Any, Any, tuple[str, dict]]:
+    ) -> dict | Coroutine[Any, Any, dict]:
         """获取分块上传的链接和请求头
 
         .. caution::
@@ -1129,13 +1129,19 @@ class P115MultipartUpload:
 
         :return: 上传链接 和 请求头 的 2 元组
         """
-        return oss_multipart_upload_url(
-            self.url, 
-            self.upload_id, 
-            part_number, 
-            async_=async_, 
-            **request_kwargs, 
-        )
+        def gen_step():
+            from p115oss.api import _upload_token
+            token = yield _upload_token(async_=async_)
+            result = yield oss_multipart_upload_url(
+                self.url, 
+                upload_id=self.upload_id, 
+                part_number=part_number, 
+                async_=async_, # type: ignore
+                **request_kwargs, 
+            )
+            result["token"] = token
+            return result
+        return run_gen_step(gen_step, async_)
 
     @overload
     def iter_upload(
@@ -1250,7 +1256,7 @@ class P115MultipartUpload:
         /, 
         part_number_start: int = 1, 
         headers: None | dict[str, str] = None, 
-    ) -> Iterator[tuple[str, dict]]:
+    ) -> Iterator[dict]:
         """逐个获取上传链接和请求头
 
         .. caution::

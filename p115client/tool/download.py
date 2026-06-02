@@ -1456,12 +1456,15 @@ def iter_download_nodes(
         if not (ensure_name and attrs):
             return attrs
         def request(attrs: Sequence[dict], /):
-            resp = yield file_skim(
-                (a["id"] for a in attrs), 
-                method="POST", 
-                async_=async_, 
-                **request_kwargs, 
-            )
+            while True:
+                resp = yield file_skim(
+                    (a["id"] for a in attrs), 
+                    method="POST", 
+                    async_=async_, 
+                    **request_kwargs, 
+                )
+                if resp["state"] or resp.get("error") != "参数错误。":
+                    break
             if resp.get("error") == "文件不存在":
                 return attrs
             check_response(resp)
