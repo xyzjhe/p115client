@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "p115client"
-version = "0.0.8.5.1"
+version = "0.0.8.6"
 description = "Python 115 webdisk client."
 authors = ["ChenyangGao <wosiwujm@gmail.com>"]
 license = "MIT"
@@ -39,7 +39,7 @@ iter_collect = ">=0.0.6"
 iterdir = ">=0.0.10"
 orjson = "*"
 p115cipher = ">=0.0.5.2"
-p115oss = ">=0.1.0"
+p115oss = ">=0.1.0.1"
 p115pickcode = ">=0.0.5.4"
 posixpatht = ">=0.0.4"
 python-argtools = ">=0.0.2"
@@ -62,7 +62,7 @@ python-temporary = ">=0.0.1"
 python-undefined = ">=0.0.4"
 qrcode = "*"
 sqlitetools = ">=0.0.7"
-urllib3_future_request = ">=0.0.1.2"
+urllib3_future_request = ">=0.0.1.4"
 yarl = "*"
 
 [build-system]

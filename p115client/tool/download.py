@@ -1376,10 +1376,11 @@ def iter_download_nodes(
     pickcode: str | int | Mapping = "", 
     files: bool = True, 
     ensure_name: bool = False, 
+    get_raw: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = ..., 
     max_workers: None | int = 0, 
     max_page: int | None = 0, 
-    app: str = "android", 
+    app: str = "chrome", 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -1391,10 +1392,11 @@ def iter_download_nodes(
     pickcode: str | int | Mapping = "", 
     files: bool = True, 
     ensure_name: bool = False, 
+    get_raw: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = ..., 
     max_workers: None | int = 0, 
     max_page: int | None = 0, 
-    app: str = "android", 
+    app: str = "chrome", 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -1405,10 +1407,11 @@ def iter_download_nodes(
     pickcode: str | int | Mapping = "", 
     files: bool = True, 
     ensure_name: bool = False, 
+    get_raw: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = ..., 
     max_workers: None | int = 0, 
     max_page: int | None = 0, 
-    app: str = "android", 
+    app: str = "chrome", 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -1424,6 +1427,7 @@ def iter_download_nodes(
     :param pickcode: 目录的 pickcode 或 id
     :param files: 如果为 True，则只获取文件，否则只获取目录
     :param ensure_name: 确保返回数据中有 "name" 字段
+    :param get_raw: 返回原始数据
     :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
     :param max_workers: 最大并发数，如果为 None 或 < 0 则自动确定，如果为 0 则单工作者惰性执行
     :param max_page: 要拉取的最大页码（页码从 1 开始计数）
@@ -1442,7 +1446,7 @@ def iter_download_nodes(
         pickcode = cast(str | int, get_first(pickcode, "pickcode", "id"))
     if not isinstance(client, (P115Client, P115OpenClient)):
         client = P115Client(client, check_for_relogin=True)
-    if max_workers is None or max_workers <= 0:
+    if max_workers is None or max_workers < 0:
         max_workers = 20 if async_ else min(32, (cpu_count() or 1) + 4)
     if files:
         get_nodes = client.download_files_app
@@ -1457,33 +1461,71 @@ def iter_download_nodes(
             return attrs
         def request(attrs: Sequence[dict], /):
             while True:
-                resp = yield file_skim(
-                    (a["id"] for a in attrs), 
-                    method="POST", 
-                    async_=async_, 
-                    **request_kwargs, 
-                )
+                if get_raw:
+                    resp = yield file_skim(
+                        (to_id(a["pc"]) for a in attrs), 
+                        method="POST", 
+                        async_=async_, 
+                        **request_kwargs, 
+                    )
+                else:
+                    resp = yield file_skim(
+                        (a["id"] for a in attrs), 
+                        method="POST", 
+                        async_=async_, 
+                        **request_kwargs, 
+                    )
                 if resp["state"] or resp.get("error") != "参数错误。":
                     break
             if resp.get("error") == "文件不存在":
                 return attrs
             check_response(resp)
-            nodes = {
-                int(node["file_id"]): (
-                    ("name", unescape_115_charref(node["file_name"])), 
-                    ("sha1", node["sha1"]), 
-                ) for node in resp["data"]
-            }
-            for attr in attrs:
-                if items := nodes.get(attr["id"]):
-                    attr.update(items)
-            return attrs
+            if "sha1" in attrs[0]:
+                if get_raw:
+                    nodes: dict = {
+                        node["pick_code"]: unescape_115_charref(node["file_name"]) 
+                        for node in resp["data"]
+                    }
+                    for attr in attrs:
+                        if name := nodes.get(attr["pc"]):
+                            attr["fn"] = name
+                else:
+                    nodes = {
+                        node["pick_code"]: unescape_115_charref(node["file_name"])
+                        for node in resp["data"]
+                    }
+                    for attr in attrs:
+                        if items := nodes.get(attr["pickcode"]):
+                            attr["name"] = name
+                return attrs
+            else:
+                if get_raw:
+                    nodes = {
+                        node["pick_code"]: (
+                            ("fn", unescape_115_charref(node["file_name"])), 
+                            ("sha1", node["sha1"]), 
+                        ) for node in resp["data"]
+                    }
+                    for attr in attrs:
+                        if items := nodes.get(attr["pc"]):
+                            attr.update(items)
+                else:
+                    nodes = {
+                        node["pick_code"]: (
+                            ("name", unescape_115_charref(node["file_name"])), 
+                            ("sha1", node["sha1"]), 
+                        ) for node in resp["data"]
+                    }
+                    for attr in attrs:
+                        if items := nodes.get(attr["pickcode"]):
+                            attr.update(items)
+                return attrs
         return run_gen_step(request(attrs), async_)
     def parse(_, content: bytes, /) -> dict:
         resp = loads(content)
         check_response(resp)
         data = resp["data"]
-        if attrs := data["list"]:
+        if not get_raw and (attrs := data.get("list")):
             if files:
                 for i, info in enumerate(attrs):
                     attrs[i] = {
@@ -1493,6 +1535,8 @@ def iter_download_nodes(
                         "parent_id": int(info["pid"]), 
                         "size": info["fs"], 
                     }
+                    if "sha1" in "info":
+                        attrs[i]["sha1"] = info["sha1"]
             else:
                 for i, info in enumerate(attrs):
                     attrs[i] = {
@@ -1509,7 +1553,7 @@ def iter_download_nodes(
         **request_kwargs, 
         "parse": parse, 
     }
-    if max_workers == 1:
+    if max_workers == 0:
         def iter_list(pickcode: str, /):
             if max_page and max_page > 0:
                 cnt: Iterable[int] = range(1, max_page + 1)
@@ -1522,7 +1566,9 @@ def iter_download_nodes(
                     async_=async_, 
                     **kwargs, 
                 )
-                yield Yield(resp["list"])
+                check_response(resp)
+                if ls := resp.get("list"):
+                    yield Yield(ls)
                 if not resp["has_next_page"]:
                     break
     else:
@@ -1608,7 +1654,9 @@ def iter_download_nodes(
                         async_=async_, 
                         **kwargs, 
                     )
-                    put(resp["list"])
+                    check_response(resp)
+                    if ls := resp.get("list"):
+                        put(ls)
                     if not resp["has_next_page"]:
                         set_max_page(page)
             except StopIteration:
@@ -1673,12 +1721,30 @@ def iter_download_nodes(
             )) as get_next:
                 while True:
                     attr = yield get_next()
-                    if attr["is_dir"]:
-                        if not files:
+                    if get_raw:
+                        if attr["is_dir"]:
+                            if not files:
+                                yield Yield({
+                                    "fid": attr["id"], 
+                                    "fn": attr["name"], 
+                                    "pid": attr["parent_id"], 
+                                })
+                            add_pickcode(attr["pickcode"])
+                        elif files:
+                            yield Yield({
+                                "pid": attr["parent_id"], 
+                                "pc": attr["pickcode"], 
+                                "fn": attr["name"], 
+                                "fs": attr["size"], 
+                                "sha1": attr["sha1"], 
+                            })
+                    else:
+                        if attr["is_dir"]:
+                            if not files:
+                                yield Yield(attr)
+                            add_pickcode(attr["pickcode"])
+                        elif files:
                             yield Yield(attr)
-                        add_pickcode(attr["pickcode"])
-                    elif files:
-                        yield Yield(attr)
             for pickcode in pickcodes:
                 yield YieldFrom(gen_step(pickcode))
         return run_gen_step_iter(chain, async_)

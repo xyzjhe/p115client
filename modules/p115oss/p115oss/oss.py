@@ -195,6 +195,7 @@ def oss_request(
 
     :return: 接口返回数据
     """
+    request_kwargs.setdefault("parse", True)
     def gen_step():
         nonlocal endpoint, request, token
         if request is None:
@@ -1074,7 +1075,7 @@ def oss_multipart_upload(
             ), 
         )
         parts = [*(p for p in parts[:-1] if p["Size"] >= 1024 * 100), parts[-1]]
-        return (yield oss_multipart_upload_complete(
+        return oss_multipart_upload_complete(
             url_or_key, 
             upload_id=upload_id, 
             parts=parts, 
@@ -1084,6 +1085,6 @@ def oss_multipart_upload(
             endpoint=endpoint, 
             async_=async_, 
             **request_kwargs, 
-        ))
+        )
     return run_gen_step(gen_step, async_)
 

@@ -117,17 +117,17 @@ def expand_payload(
 
 def json_loads(content: Buffer, /):
     try:
-        if isinstance(content, (bytes, bytearray, memoryview)):
+        if isinstance(content, (bytes, bytearray)):
             return loads(content)
         else:
-            return loads(memoryview(content))
+            return loads(memoryview(content).cast("B"))
     except Exception:
         throw(errno.ENODATA, bytes(content))
 
 
 def default_parse(_, content: Buffer, /):
-    if not isinstance(content, (bytes, bytearray, memoryview)):
-        content = memoryview(content)
+    if not isinstance(content, (bytes, bytearray)):
+        content = memoryview(content).cast("B")
     if len(content) > 2 and bytes((content[0], content[-1])) not in (b"{}", b"[]", b'""'):
         try:
             content = ecdh_aes_decrypt(content)
@@ -209,8 +209,8 @@ def default_check_for_relogin(e: BaseException, /) -> bool:
 
 def parse_upload_init_response(_, content: bytes, /) -> dict:
     data = ecdh_aes_decrypt(content)
-    if not isinstance(data, (bytes, bytearray, memoryview)):
-        data = memoryview(data)
+    if not isinstance(data, (bytes, bytearray)):
+        data = memoryview(data).cast("B")
     return json_loads(data)
 
 
@@ -1877,7 +1877,7 @@ class P115OpenClient(ClientRequestMixin):
 
     @locked_cacheproperty
     def pickcode_stable_point(self, /) -> str:
-        """获取 pickcode 的不动点
+        """获取 pickcode 的不动点，或者也叫本征值
 
         .. todo::
             不动点可能和用户 id 有某种联系，但目前样本不足，难以推断，以后再尝试分析
@@ -5155,40 +5155,6 @@ class P115Client(P115OpenClient):
             return cls(cookies, check_for_relogin=check_for_relogin)
         return run_gen_step(gen_step, async_)
 
-    @overload
-    def logout(
-        self, 
-        /, 
-        async_: Literal[False] = False, 
-        **request_kwargs, 
-    ) -> Any:
-        ...
-    @overload
-    def logout(
-        self, 
-        /, 
-        async_: Literal[True], 
-        **request_kwargs, 
-    ) -> Coroutine[Any, Any, Any]:
-        ...
-    def logout(
-        self, 
-        /, 
-        async_: Literal[False, True] = False, 
-        **request_kwargs, 
-    ) -> Any | Coroutine[Any, Any, Any]:
-        """退出当前设备的登录状态
-        """
-        ssoent = self.login_ssoent
-        if not ssoent:
-            if async_:
-                async def none():
-                    return None
-                return none()
-            else:
-                return None
-        return self.logout_by_ssoent(ssoent, async_=async_, **request_kwargs)
-
     def request(
         self, 
         /, 
@@ -5340,6 +5306,8 @@ class P115Client(P115OpenClient):
                 request_kwargs.setdefault("data", payload)
             else:
                 request_kwargs.setdefault("params", payload)
+        if isinstance((params := request_kwargs.get("params")), dict):
+            params.setdefault("app_ver", "99.99.99")
         request_kwargs["request"] = request
         request = get_request(async_, request_kwargs)
         check_for_relogin = self.check_for_relogin
@@ -7136,6 +7104,9 @@ class P115Client(P115OpenClient):
 
         GET https://proapi.115.com/app/chrome/downfolders
 
+        .. caution::
+            不允许直接从根目录获取，因为根目录没有 ``pickcode``
+
         :payload:
             - pickcode: str 💡 提取码
             - page: int = 1 💡 第几页
@@ -7189,6 +7160,12 @@ class P115Client(P115OpenClient):
         """获取待下载的文件列表
 
         GET https://proapi.115.com/app/chrome/downfiles
+
+        .. caution::
+            不允许直接从根目录获取，因为根目录没有 ``pickcode``
+
+        .. tip::
+            如果 ``app`` 不是 "chrome"，那么会多一个字段 "sha1"，虽依然没有文件名，但有 "fs"（文件大小），搭配 "sha1" 可以用于检测文件重复
 
         :payload:
             - pickcode: str 💡 提取码
@@ -9873,7 +9850,7 @@ class P115Client(P115OpenClient):
         async_: Literal[False, True] = False, 
         **request_kwargs, 
     ) -> dict | Coroutine[Any, Any, dict]:
-        """获取图片的各种链接
+        """获取文档的信息和下载链接
 
         GET https://webapi.115.com/files/document
 
@@ -9922,7 +9899,7 @@ class P115Client(P115OpenClient):
         async_: Literal[False, True] = False, 
         **request_kwargs, 
     ) -> dict | Coroutine[Any, Any, dict]:
-        """获取图片的各种链接
+        """获取文档的信息和下载链接
 
         GET https://proapi.115.com/android/files/document
 
@@ -17948,6 +17925,50 @@ class P115Client(P115OpenClient):
         return self.cookies_str.login_ssoent
 
     ########## Logout API ##########
+
+    @overload
+    def logout(
+        self, 
+        /, 
+        app: None | str = "android", 
+        method: str = "POST", 
+        base_url: str | Callable[[], str] = "https://qrcodeapi.115.com", 
+        *, 
+        async_: Literal[False] = False, 
+        **request_kwargs, 
+    ) -> None:
+        ...
+    @overload
+    def logout(
+        self, 
+        /, 
+        app: None | str = "android", 
+        method: str = "POST", 
+        base_url: str | Callable[[], str] = "https://qrcodeapi.115.com", 
+        *, 
+        async_: Literal[True], 
+        **request_kwargs, 
+    ) -> Coroutine[Any, Any, None]:
+        ...
+    def logout(
+        self, 
+        /, 
+        app: None | str = "android", 
+        method: str = "POST", 
+        base_url: str | Callable[[], str] = "https://qrcodeapi.115.com", 
+        *, 
+        async_: Literal[False, True] = False, 
+        **request_kwargs, 
+    ) -> None | Coroutine[Any, Any, None]:
+        """当前设备退出登录状态
+
+        POST https://qrcodeapi.115.com/app/1.0/{app}/1.0/logout/index
+
+        .. tip::
+            无论指定什么 ``app``，都是退出当前 cookies 所对应的登录设备
+        """
+        api = complete_url(f"/app/1.0/{app}/1.0/logout/index", base_url=base_url)
+        return self.request(api, method=method, async_=async_, **request_kwargs)
 
     @overload
     def logout_by_app(
@@ -26383,6 +26404,44 @@ class P115Client(P115OpenClient):
         return self.request(url=api, async_=async_, **request_kwargs)
 
     @overload
+    def user_display_uid_list(
+        self, 
+        /, 
+        app: str = "android", 
+        base_url: str | Callable[[], str] = "https://passportapi.115.com", 
+        *, 
+        async_: Literal[False] = False, 
+        **request_kwargs, 
+    ) -> dict:
+        ...
+    @overload
+    def user_display_uid_list(
+        self, 
+        /, 
+        app: str = "android", 
+        base_url: str | Callable[[], str] = "https://passportapi.115.com", 
+        *, 
+        async_: Literal[True], 
+        **request_kwargs, 
+    ) -> Coroutine[Any, Any, dict]:
+        ...
+    def user_display_uid_list(
+        self, 
+        /, 
+        app: str = "android", 
+        base_url: str | Callable[[], str] = "https://passportapi.115.com", 
+        *, 
+        async_: Literal[False, True] = False, 
+        **request_kwargs, 
+    ) -> dict | Coroutine[Any, Any, dict]:
+        """账号信息 VIP 相关信息
+
+        GET https://passportapi.115.com/app/1.0/android/1.0/user/display_uid_list
+        """
+        api = complete_url(f"/app/1.0/{app}/1.0/user/display_uid_list", base_url=base_url)
+        return self.request(url=api, async_=async_, **request_kwargs)
+
+    @overload
     def user_face_code(
         self: None | ClientRequestMixin = None, 
         /, 
@@ -26509,6 +26568,54 @@ class P115Client(P115OpenClient):
             payload = {"uid": payload}
         return get_request(async_, request_kwargs, self=self)(
             url=api, params=payload, **request_kwargs)
+
+    @overload
+    def user_info2(
+        self, 
+        payload: int | str | dict = "", 
+        /, 
+        app: str = "web", 
+        base_url: str | Callable[[], str] = "https://home.115.com", 
+        *, 
+        async_: Literal[False] = False, 
+        **request_kwargs, 
+    ) -> dict:
+        ...
+    @overload
+    def user_info2(
+        self, 
+        payload: int | str | dict = "", 
+        /, 
+        app: str = "web", 
+        base_url: str | Callable[[], str] = "https://home.115.com", 
+        *, 
+        async_: Literal[True], 
+        **request_kwargs, 
+    ) -> Coroutine[Any, Any, dict]:
+        ...
+    def user_info2(
+        self, 
+        payload: int | str | dict = "", 
+        /, 
+        app: str = "web", 
+        base_url: str | Callable[[], str] = "https://home.115.com", 
+        *, 
+        async_: Literal[False, True] = False, 
+        **request_kwargs, 
+    ) -> dict | Coroutine[Any, Any, dict]:
+        """获取用户信息
+
+        GET https://home.115.com/api/1.0/android/1.0/user/user_info
+
+        :payload:
+            - uid: int | str
+        """
+        api = complete_url(f"/api/1.0/{app}/1.0/user/user_info", base_url=base_url)
+        if not payload:
+            payload = {"uid": self.user_id}
+        elif not isinstance(payload, dict):
+            payload = {"uid": payload}
+        return self.request(url=api, params=payload, async_=async_, **request_kwargs)
 
     @overload
     def user_info_set(
@@ -26985,7 +27092,7 @@ class P115Client(P115OpenClient):
         self, 
         payload: int | str | dict = "", 
         /, 
-        app="android", 
+        app: str = "android", 
         base_url: str | Callable[[], str] = "https://passportapi.115.com", 
         *, 
         async_: Literal[False] = False, 
@@ -26997,7 +27104,7 @@ class P115Client(P115OpenClient):
         self, 
         payload: int | str | dict = "", 
         /, 
-        app="android", 
+        app: str = "android", 
         base_url: str | Callable[[], str] = "https://passportapi.115.com", 
         *, 
         async_: Literal[True], 
@@ -27008,7 +27115,7 @@ class P115Client(P115OpenClient):
         self, 
         payload: int | str | dict = "", 
         /, 
-        app="android", 
+        app: str = "android", 
         base_url: str | Callable[[], str] = "https://passportapi.115.com", 
         *, 
         async_: Literal[False, True] = False, 
