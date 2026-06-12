@@ -1379,6 +1379,7 @@ def iter_download_nodes(
     get_raw: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = ..., 
     max_workers: None | int = 0, 
+    per_page: int = 5000, 
     max_page: int | None = 0, 
     app: str = "chrome", 
     *, 
@@ -1395,6 +1396,7 @@ def iter_download_nodes(
     get_raw: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = ..., 
     max_workers: None | int = 0, 
+    per_page: int = 5000, 
     max_page: int | None = 0, 
     app: str = "chrome", 
     *, 
@@ -1410,6 +1412,7 @@ def iter_download_nodes(
     get_raw: bool = False, 
     id_to_dirnode: None | EllipsisType | MutableMapping[int, tuple[str, int]] = ..., 
     max_workers: None | int = 0, 
+    per_page: int = 5000, 
     max_page: int | None = 0, 
     app: str = "chrome", 
     *, 
@@ -1421,7 +1424,7 @@ def iter_download_nodes(
     .. caution::
         不要在不确定的情况下，给 ``max_page`` 设置一个特别大的值，这会大致大量无用的请求，导致服务器繁忙，响应效率低下    
 
-        对于 ``x`` 个文件或目录，相应的 ``d, r = divmod(x, 5000); max_page += (r > 0)``，或者 ``max_page = -(-x // 5000)``
+        对于 ``x`` 个文件或目录，相应的 ``d, r = divmod(x, per_page); max_page += (r > 0)``，或者 ``max_page = -(-x // per_page)``
 
     :param client: 115 客户端或 cookies
     :param pickcode: 目录的 pickcode 或 id
@@ -1430,6 +1433,7 @@ def iter_download_nodes(
     :param get_raw: 返回原始数据
     :param id_to_dirnode: 字典，保存 id 到对应文件的 ``(name, parent_id)`` 元组的字典
     :param max_workers: 最大并发数，如果为 None 或 < 0 则自动确定，如果为 0 则单工作者惰性执行
+    :param per_page: 每一页最多拉取条数
     :param max_page: 要拉取的最大页码（页码从 1 开始计数）
 
         - 如果为 None，则页码从小到大拉取，并会尝试获取总文件数，当获取到后且还在运行中，则从后往前拉取
@@ -1448,6 +1452,8 @@ def iter_download_nodes(
         client = P115Client(client, check_for_relogin=True)
     if max_workers is None or max_workers < 0:
         max_workers = 20 if async_ else min(32, (cpu_count() or 1) + 4)
+    if not 0 < per_page <= 5000:
+        per_page = 5000
     if files:
         get_nodes = client.download_files_app
     else:
@@ -1599,7 +1605,7 @@ def iter_download_nodes(
                         count = int(resp["count"])
                     else:
                         count = int(resp["folder_count"])
-                    set_max_page(-(-count // 5000))
+                    set_max_page(-(-count // per_page))
                 finally:
                     task = None
             task.add_done_callback(callback)

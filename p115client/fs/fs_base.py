@@ -3630,13 +3630,11 @@ class P115FileSystemBase[P115PathType: P115PathBase](ABC):
         errors: None | str = None, 
         newline: None | str = None, 
         start: int = 0, 
-        seek_threshold: int = 1 << 20, 
         http_file_reader_cls: None | type[HTTPFileReader] = None, 
         pid: None | int = None, 
         refresh: None | bool = None, 
         *, 
         async_: Literal[False] = False, 
-        **request_kwargs, 
     ) -> HTTPFileReader | BufferedReader:
         ...
     @overload
@@ -3650,13 +3648,11 @@ class P115FileSystemBase[P115PathType: P115PathBase](ABC):
         errors: None | str = None, 
         newline: None | str = None, 
         start: int = 0, 
-        seek_threshold: int = 1 << 20, 
         http_file_reader_cls: None | type[HTTPFileReader] = None, 
         pid: None | int = None, 
         refresh: None | bool = None, 
         *, 
         async_: Literal[False] = False, 
-        **request_kwargs, 
     ) -> TextIOWrapper:
         ...
     @overload
@@ -3670,13 +3666,11 @@ class P115FileSystemBase[P115PathType: P115PathBase](ABC):
         errors: None | str = None, 
         newline: None | str = None, 
         start: int = 0, 
-        seek_threshold: int = 1 << 20, 
         http_file_reader_cls: None | type[AsyncHTTPFileReader] = None, 
         pid: None | int = None, 
         refresh: None | bool = None, 
         *, 
         async_: Literal[True], 
-        **request_kwargs, 
     ) -> AsyncHTTPFileReader | AsyncBufferedReader:
         ...
     @overload
@@ -3690,13 +3684,11 @@ class P115FileSystemBase[P115PathType: P115PathBase](ABC):
         errors: None | str = None, 
         newline: None | str = None, 
         start: int = 0, 
-        seek_threshold: int = 1 << 20, 
         http_file_reader_cls: None | type[AsyncHTTPFileReader] = None, 
         pid: None | int = None, 
         refresh: None | bool = None, 
         *, 
         async_: Literal[True], 
-        **request_kwargs, 
     ) -> AsyncTextIOWrapper:
         ...
     def open(
@@ -3709,32 +3701,33 @@ class P115FileSystemBase[P115PathType: P115PathBase](ABC):
         errors: None | str = None, 
         newline: None | str = None, 
         start: int = 0, 
-        seek_threshold: int = 1 << 20, 
         http_file_reader_cls: None | type[HTTPFileReader] | type[AsyncHTTPFileReader] = None, 
         pid: None | int = None, 
         refresh: None | bool = None, 
         *, 
         async_: Literal[False, True] = False, 
-        **request_kwargs, 
     ) -> HTTPFileReader | BufferedReader | TextIOWrapper | AsyncHTTPFileReader | AsyncBufferedReader | AsyncTextIOWrapper:
         """打开一个文件，仅用于读取
         """
         if mode not in ("r", "rt", "tr", "rb", "br"):
             throw(errno.EINVAL, f"invalid (or unsupported) mode: {mode!r}")
         def gen_step():
+            nonlocal http_file_reader_cls
+            if http_file_reader_cls is None:
+                if async_:
+                    http_file_reader_cls = AsyncHTTPFileReader
+                else:
+                    http_file_reader_cls = HTTPFileReader
             url = yield self.get_url(
                 id_or_path, 
                 pid=pid, 
                 refresh=refresh, 
                 async_=async_, 
-                **request_kwargs, 
             )
             file = yield self.client.open(
                 url, 
                 start=start, 
-                seek_threshold=seek_threshold, 
                 http_file_reader_cls=http_file_reader_cls, 
-                **request_kwargs, 
             )
             return file.wrap(
                 text_mode="b" not in mode, 

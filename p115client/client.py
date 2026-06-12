@@ -1952,7 +1952,7 @@ class P115OpenClient(ClientRequestMixin):
     @overload
     def download_url(
         self, 
-        pickcode: str, 
+        pickcode: int | str, 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
@@ -1964,7 +1964,7 @@ class P115OpenClient(ClientRequestMixin):
     @overload
     def download_url(
         self, 
-        pickcode: str, 
+        pickcode: int | str, 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
@@ -1975,7 +1975,7 @@ class P115OpenClient(ClientRequestMixin):
         ...
     def download_url(
         self, 
-        pickcode: str, 
+        pickcode: int | str, 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
@@ -1996,7 +1996,7 @@ class P115OpenClient(ClientRequestMixin):
                 - 如果为 1，则需要 user-agent（和请求直链时的一致）
                 - 如果为 3，则需要 user-agent（和请求直链时的一致） 和 Cookie（由请求直链时的响应所返回的 Set-Cookie 响应头）
 
-        :param pickcode: 提取码
+        :param pickcode: id 或者提取码
         :param strict: 如果为 True，当目标是目录时，会抛出 IsADirectoryError 异常
         :param user_agent: 如果不为 None，则作为请求头 "user-agent" 的值
         :param async_: 是否异步
@@ -2004,6 +2004,7 @@ class P115OpenClient(ClientRequestMixin):
 
         :return: 下载链接
         """
+        pickcode = self.to_pickcode(pickcode)
         def gen_step():
             resp = yield self.download_url_info_open(
                 pickcode, 
@@ -2039,7 +2040,7 @@ class P115OpenClient(ClientRequestMixin):
     @overload
     def download_urls(
         self, 
-        pickcodes: str | Iterable[str], 
+        pickcodes: int | str | Iterable[int | str], 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
@@ -2051,7 +2052,7 @@ class P115OpenClient(ClientRequestMixin):
     @overload
     def download_urls(
         self, 
-        pickcodes: str | Iterable[str], 
+        pickcodes: int | str | Iterable[int | str], 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
@@ -2062,7 +2063,7 @@ class P115OpenClient(ClientRequestMixin):
         ...
     def download_urls(
         self, 
-        pickcodes: str | Iterable[str], 
+        pickcodes: int | str | Iterable[int | str], 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
@@ -2091,8 +2092,10 @@ class P115OpenClient(ClientRequestMixin):
 
         :return: 一批下载链接
         """
-        if not isinstance(pickcodes, str):
-            pickcodes = ",".join(pickcodes)
+        if isinstance(pickcodes, (int, str)):
+            pickcodes = self.to_pickcode(pickcodes)
+        else:
+            pickcodes = ",".join(map(self.to_pickcode, pickcodes))
         def gen_step():
             resp = yield self.download_url_info_open(
                 pickcodes, 
@@ -5446,76 +5449,69 @@ class P115Client(P115OpenClient):
                         yield revert_cert_headers(cert_headers)
                     return resp
         return run_gen_step(gen_step, async_)
- 
-    @overload
+
     def open(
         self, 
+        url: int | str | Sequence[str] | Mapping | Callable[[], str], 
         /, 
-        url: str | Callable[[], str], 
-        start: int = 0, 
-        seek_threshold: int = 1 << 20, 
-        headers: None | Mapping = None, 
-        http_file_reader_cls: None | type[HTTPFileReader] = None, 
-        *, 
-        async_: Literal[False] = False, 
-    ) -> HTTPFileReader:
-        ...
-    @overload
-    def open(
-        self, 
-        /, 
-        url: str | Callable[[], str] | Callable[[], Awaitable[str]], 
-        start: int = 0, 
-        seek_threshold: int = 1 << 20, 
-        headers: None | Mapping = None, 
-        http_file_reader_cls: None | type[AsyncHTTPFileReader] = None, 
-        *, 
-        async_: Literal[True], 
-    ) -> AsyncHTTPFileReader:
-        ...
-    def open(
-        self, 
-        /, 
-        url: str | Callable[[], str] | Callable[[], Awaitable[str]], 
-        start: int = 0, 
-        seek_threshold: int = 1 << 20, 
-        headers: None | Mapping = None, 
-        http_file_reader_cls: None | type[HTTPFileReader] | type[AsyncHTTPFileReader] = None, 
+        start: int | str = 0, 
         *, 
         async_: Literal[False, True] = False, 
-    ) -> HTTPFileReader | AsyncHTTPFileReader:
-        """打开下载链接，返回文件对象
+        **request_kwargs, 
+    ):
+        """打开下载链接，返回类文件对象
 
-        :param url: 115 文件的下载链接（可以从网盘、网盘上的压缩包内、分享链接中获取）
-
-            - P115Client.download_url
-            - P115Client.share_download_url
-            - P115Client.extract_download_url
-
+        :param url: 可以是 下载链接、id、pickcode、path、sha1 等
         :param start: 开始索引
-        :param seek_threshold: 当向前 seek 的偏移量不大于此值时，调用 read 来移动文件位置（可避免重新建立连接）
-        :param http_file_reader_cls: 返回的文件对象的类，需要是 `httpfile.HTTPFileReader` 的子类
-        :param headers: 请求头
         :param async_: 是否异步
+        :param request_kwargs: 其它请求参数
 
-        :return: 返回打开的文件对象，可以读取字节数据
+        :return: 类文件对象
         """
-        request_headers = self.headers.copy()
-        if isinstance(url, P115URL):
-            request_headers.update(url.get("headers") or ())
-        if headers:
-            request_headers.update(headers)
-        if http_file_reader_cls is None:
-            if async_:
-                http_file_reader_cls = AsyncHTTPFileReader
-            else:
-                http_file_reader_cls = HTTPFileReader
-        return http_file_reader_cls(
-            url, # type: ignore
-            headers=request_headers, 
-            start=start, 
-            seek_threshold=seek_threshold, 
-        )
+        headers = request_kwargs["headers"] = dict(request_kwargs.get("headers") or ())
+        headers.setdefault("cookie", self.cookies_str)
+        headers.setdefault("user-agent", "")
+        if isinstance(start, str):
+            if not start.startswith("bytes="):
+                start = "bytes=" + start
+        elif start >= 0:
+            start = f"bytes={start}-"
+        else:
+            start = f"bytes={start}"
+        headers["range"] = start
+        def gen_step():
+            nonlocal url
+            from urllib3_future_request import request
+
+            if callable(url):
+                url = url()
+                if async_ and isawaitable(url):
+                    url = yield url
+            elif not (isinstance(url, str) and url.startswith(("http://", "https://"))):
+                from .exception import P115AccessError
+                from .tool import get_id
+
+                fid = yield get_id(self, url, ensure_file=True, async_=async_)
+                pickcode = self.to_pickcode(fid)
+                try:
+                    url = yield self.download_url(pickcode, app="android", async_=async_)
+                except P115AccessError:
+                    size = getattr(fid, "size", -1)
+                    if size < 0:
+                        resp = yield self.fs_file_skim(fid, async_=async_)
+                        check_response(resp)
+                        size = int(resp["data"][0]["file_size"])
+                    if size > 1024 * 1024 * 200:
+                        raise
+                    url = yield self.download_url(pickcode, app="web", async_=async_)
+            if isinstance(url, P115URL):
+                headers.update(url.get("headers") or ())
+            return request(
+                url, 
+                async_=async_, # type: ignore
+                **request_kwargs, 
+            )
+        return run_gen_step(gen_step, async_)
 
     ########## Activity API ##########
 
@@ -7112,7 +7108,7 @@ class P115Client(P115OpenClient):
             - page: int = 1 💡 第几页
             - per_page: int = 5000 💡 每页大小，目前最大为 5000
         """
-        if app in ("web", "desktop", "chrome"):
+        if app in ("", "chrome"):
             api = complete_url("/app/chrome/downfolders", base_url)
         else:
             if app not in ("windows", "mac", "linux", "os_windows", "os_mac", "os_linux"):
@@ -7172,7 +7168,7 @@ class P115Client(P115OpenClient):
             - page: int = 1 💡 第几页
             - per_page: int = 5000 💡 每页大小，目前最大为 5000
         """
-        if app in ("web", "desktop", "chrome"):
+        if app in ("", "chrome"):
             api = complete_url("/app/chrome/downfiles", base_url)
         else:
             if app not in ("windows", "mac", "linux", "os_windows", "os_mac", "os_linux"):
@@ -7235,7 +7231,7 @@ class P115Client(P115OpenClient):
     @overload
     def download_url(
         self, 
-        pickcode: str, 
+        pickcode: int | str, 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
@@ -7248,7 +7244,7 @@ class P115Client(P115OpenClient):
     @overload
     def download_url(
         self, 
-        pickcode: str, 
+        pickcode: int | str, 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
@@ -7260,7 +7256,7 @@ class P115Client(P115OpenClient):
         ...
     def download_url(
         self, 
-        pickcode: str, 
+        pickcode: int | str, 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
@@ -7291,6 +7287,15 @@ class P115Client(P115OpenClient):
 
         :return: 下载链接
         """
+        if app == "open":
+            return self.download_url_open(
+                pickcode, 
+                strict=strict, 
+                user_agent=user_agent, 
+                async_=async_, 
+                **request_kwargs, 
+            )
+        pickcode = self.to_pickcode(pickcode)
         def gen_step():
             if app == "web2":
                 resp = yield self.download_url_web2(
@@ -7310,7 +7315,7 @@ class P115Client(P115OpenClient):
                     is_dir=False, 
                     headers=resp["headers"], 
                 )
-            elif app in ("web", "desktop", "harmony"):
+            elif app in ("web", "desktop"):
                 resp = yield self.download_url_web(
                     pickcode, 
                     user_agent=user_agent, 
@@ -7377,10 +7382,11 @@ class P115Client(P115OpenClient):
     @overload
     def download_urls(
         self, 
-        pickcodes: str | Iterable[str], 
+        pickcodes: int | str | Iterable[int | str], 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
+        app: str = "chrome", 
         *, 
         async_: Literal[False] = False, 
         **request_kwargs, 
@@ -7389,10 +7395,11 @@ class P115Client(P115OpenClient):
     @overload
     def download_urls(
         self, 
-        pickcodes: str | Iterable[str], 
+        pickcodes: int | str | Iterable[int | str], 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
+        app: str = "chrome", 
         *, 
         async_: Literal[True], 
         **request_kwargs, 
@@ -7400,10 +7407,11 @@ class P115Client(P115OpenClient):
         ...
     def download_urls(
         self, 
-        pickcodes: str | Iterable[str], 
+        pickcodes: int | str | Iterable[int | str], 
         /, 
         strict: bool = True, 
         user_agent: None | str = None, 
+        app: str = "chrome", 
         *, 
         async_: Literal[False, True] = False, 
         **request_kwargs, 
@@ -7424,13 +7432,24 @@ class P115Client(P115OpenClient):
         :param pickcodes: 提取码，多个用逗号 "," 隔开
         :param strict: 如果为 True，当目标是目录时，会直接忽略
         :param user_agent: 如果不为 None，则作为请求头 "user-agent" 的值
+        :param app: 使用此设备的接口，要么是 "open"，要么是 "chrome"（或者其他任何值）
         :param async_: 是否异步
         :param request_kwargs: 其余请求参数
 
         :return: 一批下载链接
         """
-        if not isinstance(pickcodes, str):
-            pickcodes = ",".join(pickcodes)
+        if app == "open":
+            return self.download_urls_open(
+                pickcodes, 
+                strict=strict, 
+                user_agent=user_agent, 
+                async_=async_, 
+                **request_kwargs, 
+            )
+        if isinstance(pickcodes, (int, str)):
+            pickcodes = self.to_pickcode(pickcodes)
+        else:
+            pickcodes = ",".join(map(self.to_pickcode, pickcodes))
         def gen_step():
             resp = yield self.download_url_app(
                 pickcodes, 
@@ -7508,10 +7527,13 @@ class P115Client(P115OpenClient):
 
             如果 `app` 为 "chrome"，则仅支持 `aid=1` 的提取码获取下载链接（以前是不限制 aid 的，这样甚至可以获取已经删除的文件的下载链接）；否则，还支持 `aid=12` 的下载链接。
 
+        .. attention::
+            尽量不要尝试对已经删除的文件获取下载链接，不仅会失败，还容易触发风控
+
         :payload:
             - pickcode: str 💡 如果 `app` 为 "chrome"，则可以接受多个，多个用逗号 "," 隔开
         """
-        if app in ("web", "desktop", "chrome"):
+        if app in ("", "chrome"):
             api = complete_url("/app/chrome/downurl", base_url)
             if isinstance(payload, str):
                 payload = {"pickcode": payload}
@@ -7833,7 +7855,7 @@ class P115Client(P115OpenClient):
         """
         path = path.rstrip("/")
         def gen_step():
-            if app in ("", "web", "desktop", "harmony"):
+            if app in ("", "web", "desktop"):
                 resp = yield self.extract_download_url_web(
                     {"pick_code": pickcode, "full_name": path.lstrip("/")}, 
                     user_agent=user_agent, 
@@ -9019,7 +9041,7 @@ class P115Client(P115OpenClient):
                 - 120: 彻底删除文件、简历附件
                 - <其它>: 会被视为 0
 
-            - status: 0 | 1 = <default>
+            - status: 0 | 1 = <default> 💡 如果为 1，那么文件已被删除，会返回错误
         """
         api = complete_url("/category/get", base_url=base_url)
         if isinstance(payload, (int, str)):
@@ -9774,6 +9796,51 @@ class P115Client(P115OpenClient):
         return self.request(url=api, params=payload, async_=async_, **request_kwargs)
 
     @overload
+    def fs_dir_getid2(
+        self, 
+        payload: str | dict, 
+        /, 
+        base_url: str | Callable[[], str] = "https://webapi.115.com", 
+        *, 
+        async_: Literal[False] = False, 
+        **request_kwargs, 
+    ) -> dict:
+        ...
+    @overload
+    def fs_dir_getid2(
+        self, 
+        payload: str | dict, 
+        /, 
+        base_url: str | Callable[[], str] = "https://webapi.115.com", 
+        *, 
+        async_: Literal[True], 
+        **request_kwargs, 
+    ) -> Coroutine[Any, Any, dict]:
+        ...
+    def fs_dir_getid2(
+        self, 
+        payload: str | dict, 
+        /, 
+        base_url: str | Callable[[], str] = "https://webapi.115.com", 
+        *, 
+        async_: Literal[False, True] = False, 
+        **request_kwargs, 
+    ) -> dict | Coroutine[Any, Any, dict]:
+        """由路径获取对应的 id（但只能获取目录，不能获取文件）
+
+        GET https://webapi.115.com/files/get_path_id
+
+        :payload:
+            - path: str
+            - parent_id: int = 0
+            - is_create: 0 | 1 = 0 💡 当目录不存在时，是否创建
+        """
+        api = complete_url("/files/get_path_id", base_url=base_url)
+        if isinstance(payload, str):
+            payload = {"path": payload}
+        return self.request(url=api, params=payload, async_=async_, **request_kwargs)
+
+    @overload
     def fs_dir_getid_app(
         self, 
         payload: str | dict, 
@@ -10293,7 +10360,7 @@ class P115Client(P115OpenClient):
         GET https://webapi.115.com/files/get_info
 
         .. caution::
-            仅当文件的 aid 是 1（网盘文件）、12（瞬间文件） 或 120（永久删除文件） 时，才能用此接口获取信息，否则请用 `client.fs_file_skim` 或 `client.fs_supervision` 获取信息（只能获取比较简略的版本）。
+            仅当文件的 aid 是 1（网盘文件）、12（瞬间文件） 或 120（永久删除文件） 时，才能用此接口获取信息，否则请用 `client.fs_file_skim` 或 `client.fs_supervision` 获取信息（只能获取比较简略的信息）。
 
             特别的，文件被移入回收站后，就不能用此接口获取信息了，除非将其还原或永久删除。
 
@@ -10344,7 +10411,7 @@ class P115Client(P115OpenClient):
         GET https://webapi.115.com/files/file
 
         .. note::
-            如果需要查询到 id 特别多，请指定 `method="POST"`
+            如果需要查询的 id 特别多，请指定 `method="POST"`
 
         :payload:
             - file_id: int | str 💡 文件或目录的 id，不能为 0，多个用逗号 "," 隔开
@@ -11312,6 +11379,54 @@ class P115Client(P115OpenClient):
         if isinstance(payload, (int, str)):
             payload = {"cid": payload}
         payload = {"limit": 32, "offset": 0, "aid": 1, "type": 0, "cid": 0, **payload}
+        return self.request(url=api, params=payload, async_=async_, **request_kwargs)
+
+    @overload
+    def fs_files_property(
+        self, 
+        payload: int | str | dict | Iterable[int | str], 
+        /, 
+        base_url: str | Callable[[], str] = "https://webapi.115.com", 
+        *, 
+        async_: Literal[False] = False, 
+        **request_kwargs, 
+    ) -> dict:
+        ...
+    @overload
+    def fs_files_property(
+        self, 
+        payload: int | str | dict | Iterable[int | str], 
+        /, 
+        base_url: str | Callable[[], str] = "https://webapi.115.com", 
+        *, 
+        async_: Literal[True], 
+        **request_kwargs, 
+    ) -> Coroutine[Any, Any, dict]:
+        ...
+    def fs_files_property(
+        self, 
+        payload: int | str | dict | Iterable[int | str], 
+        /, 
+        base_url: str | Callable[[], str] = "https://webapi.115.com", 
+        *, 
+        async_: Literal[False, True] = False, 
+        **request_kwargs, 
+    ) -> dict | Coroutine[Any, Any, dict]:
+        """获取文件属性
+
+        GET https://webapi.115.com/files/property
+
+        .. danger::
+            这个接口暂不可用
+
+        :payload:
+            - file_ids: int | str 💡 文件或目录 id，多个用逗号 "," 隔开
+        """
+        api = complete_url("/files/property", base_url=base_url)
+        if isinstance(payload, (int, str)):
+            payload = {"file_ids": payload}
+        elif not isinstance(payload, dict):
+            payload = {"file_ids": ",".join(map(str, payload))}
         return self.request(url=api, params=payload, async_=async_, **request_kwargs)
 
     @overload
@@ -13337,7 +13452,7 @@ class P115Client(P115OpenClient):
             - path: str
             - parent_id: int | str = 0
         """
-        if app in ("web", "desktop", "chrome"):
+        if app in ("", "chrome"):
             api = complete_url("/app/chrome/add_path", base_url)
         else:
             api = complete_url("/2.0/ufile/add_path", base_url=base_url, app=app)
@@ -13574,6 +13689,61 @@ class P115Client(P115OpenClient):
         elif not isinstance(payload, dict):
             payload = {"ids": ",".join(map(str, payload))}
         payload = {"to_cid": pid, "user_id": self.user_id, **payload}
+        return self.request(url=api, method="POST", data=payload, async_=async_, **request_kwargs)
+
+    @overload
+    def fs_move_check_conflict(
+        self, 
+        payload: int | str | dict | Iterable[int | str], 
+        /, 
+        pid: int | str = 0, 
+        base_url: str | Callable[[], str] = "https://webapi.115.com", 
+        *, 
+        async_: Literal[False] = False, 
+        **request_kwargs, 
+    ) -> dict:
+        ...
+    @overload
+    def fs_move_check_conflict(
+        self, 
+        payload: int | str | dict | Iterable[int | str], 
+        /, 
+        pid: int | str = 0, 
+        base_url: str | Callable[[], str] = "https://webapi.115.com", 
+        *, 
+        async_: Literal[True], 
+        **request_kwargs, 
+    ) -> Coroutine[Any, Any, dict]:
+        ...
+    def fs_move_check_conflict(
+        self, 
+        payload: int | str | dict | Iterable[int | str], 
+        /, 
+        pid: int | str = 0, 
+        base_url: str | Callable[[], str] = "https://webapi.115.com", 
+        *, 
+        async_: Literal[False, True] = False, 
+        **request_kwargs, 
+    ) -> dict | Coroutine[Any, Any, dict]:
+        """检查移动文件或目录时，是否有冲突
+
+        POST https://webapi.115.com/files/move_check_conflict
+
+        :payload:
+            - move_fids: int | str 💡 文件或目录 id，只接受单个 id
+            - move_fids[]: int | str
+            - ...
+            - move_fids[0]: int | str
+            - move_fids[1]: int | str
+            - ...
+            - pid: int | str = 0 💡 目标目录 id
+        """
+        api = complete_url("/files/move_check_conflict", base_url=base_url)
+        if isinstance(payload, (int, str)):
+            payload = {"move_fids": payload}
+        elif not isinstance(payload, dict):
+            payload = {f"move_fids[{i}]": fid for i, fid in enumerate(payload)}
+        payload.setdefault("pid", pid)
         return self.request(url=api, method="POST", data=payload, async_=async_, **request_kwargs)
 
     @overload
@@ -23417,7 +23587,7 @@ class P115Client(P115OpenClient):
             - receive_code: str
             - cid: int | str
         """
-        if app:
+        if app in ("", "chrome"):
             api = complete_url("/2.0/share/downlist", base_url=base_url, app=app)
         else:
             api = complete_url("/app/share/downlist", base_url)
@@ -23485,7 +23655,7 @@ class P115Client(P115OpenClient):
             payload["share_code"] = share_payload["share_code"]
             payload["receive_code"] = share_payload["receive_code"] or ""
         def gen_step():
-            if app in ("web", "desktop", "harmony"):
+            if app in ("web", "desktop"):
                 resp = yield self.share_download_url_web(payload, async_=async_, **request_kwargs)
             else:
                 resp = yield self.share_download_url_app(payload, app=app, async_=async_, **request_kwargs)
@@ -23556,7 +23726,7 @@ class P115Client(P115OpenClient):
             - receive_code: str
             - share_code: str
         """
-        if app:
+        if app in ("", "chrome"):
             api = complete_url("/2.0/share/downurl", base_url=base_url, app=app)
             return self.request(url=api, params=payload, async_=async_, **request_kwargs)
         else:
@@ -24396,7 +24566,7 @@ class P115Client(P115OpenClient):
             payload["receive_code"] = share_payload["receive_code"] or ""
         cls: type[P115Client] = __class__ # type: ignore
         def gen_step():
-            if app in ("web", "desktop", "harmony"):
+            if app in ("web", "desktop"):
                 resp = yield cls.share_skip_login_download_url_web(
                     self, payload, async_=async_, **request_kwargs)
             else:
@@ -24476,7 +24646,7 @@ class P115Client(P115OpenClient):
             payload = self
         else:
             assert payload is not None
-        if app:
+        if app in ("", "chrome"):
             api = complete_url("/2.0/share/skip_login_downurl", base_url=base_url, app=app)
         else:
             api = complete_url("/app/share/skip_login_downurl", base_url)
@@ -26548,13 +26718,21 @@ class P115Client(P115OpenClient):
     ) -> dict | Coroutine[Any, Any, dict]:
         """获取用户信息
 
-        GET https://my.115.com/proapi/3.0/index.php?method=user_info
+        GET https://my.115.com/proapi/3.0/index.php
 
         .. note::
             可以作为 ``staticmethod`` 使用，但必须指定查询参数 ``uid``
 
         :payload:
             - uid: int | str
+            - method: str = "user_info" 💡 需要获取的数据类别
+
+                - "user_info": 用户信息
+                - "get_interests_list": 兴趣列表
+                - "get_jobs_list": 工作列表
+                - "get_privacy_settings": 隐私资料
+                - "get_public": 公开资料
+                - ...
         """
         api = complete_url("/proapi/3.0/index.php", base_url=base_url, query={"method": "user_info"})
         if not isinstance(self, ClientRequestMixin):
@@ -26564,8 +26742,11 @@ class P115Client(P115OpenClient):
                 payload = self.user_id
             else:
                 raise ValueError("no payload provided")
-        if not isinstance(payload, dict):
+        if isinstance(payload, int):
             payload = {"uid": payload}
+        elif isinstance(payload, str):
+            payload = {"method": payload}
+        payload.setdefault("method", "user_info")
         return get_request(async_, request_kwargs, self=self)(
             url=api, params=payload, **request_kwargs)
 
@@ -26616,6 +26797,41 @@ class P115Client(P115OpenClient):
         elif not isinstance(payload, dict):
             payload = {"uid": payload}
         return self.request(url=api, params=payload, async_=async_, **request_kwargs)
+
+    @overload
+    def user_info3(
+        self, 
+        /, 
+        base_url: str | Callable[[], str] = "https://my.115.com", 
+        *, 
+        async_: Literal[False] = False, 
+        **request_kwargs, 
+    ) -> dict:
+        ...
+    @overload
+    def user_info3(
+        self, 
+        /, 
+        base_url: str | Callable[[], str] = "https://my.115.com", 
+        *, 
+        async_: Literal[True], 
+        **request_kwargs, 
+    ) -> Coroutine[Any, Any, dict]:
+        ...
+    def user_info3(
+        self, 
+        /, 
+        base_url: str | Callable[[], str] = "https://my.115.com", 
+        *, 
+        async_: Literal[False, True] = False, 
+        **request_kwargs, 
+    ) -> dict | Coroutine[Any, Any, dict]:
+        """获取用户信息
+
+        GET https://my.115.com/?ct=ajax&ac=nav
+        """
+        api = complete_url(base_url=base_url, query={"ct": "ajax", "ac": "nav"})
+        return self.request(url=api, async_=async_, **request_kwargs)
 
     @overload
     def user_info_set(

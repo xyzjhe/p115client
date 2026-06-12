@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # encoding: utf-8
 
-__all__ = ["upload_file_init", "upload_file"]
+__all__ = ["upload_file_init", "upload_file", "MultipartUploadAbort"]
 
 from asyncio import to_thread
 from collections.abc import Buffer, Callable, Coroutine
@@ -30,6 +30,10 @@ from .oss import (
 
 
 CRE_UID_in_COOKIE_search: Final = re_compile(r"(?<=\bUID=)\w+").search
+
+
+class MultipartUploadAbort(OSError):
+    ...
 
 
 def urlopen(
@@ -421,6 +425,9 @@ def upload_file(
 ) -> dict | Coroutine[Any, Any, dict]:
     """上传文件
 
+    .. note::
+        如果想要断点续传，需要提供 ``callback`` 和 ``upload_id``
+
     :param file: 待上传的文件或其路径
     :param pid: 上传文件到目录的 id
     :param filename: 文件名，若为空则自动确定
@@ -621,10 +628,9 @@ def upload_file(
                 )
         except BaseException as e:
             data = locals()
-            upload_data = {k: data[k] for k in (
+            raise MultipartUploadAbort({k: data[k] for k in (
                 "pid", "filename", "filesha1", "filesize", "user_id", 
                 "user_key", "partsize", "callback", "upload_id", 
-            )}
-            raise OSError(5, f"upload failed: {upload_data!r}") from e
+            )}) from e
     return run_gen_step(gen_step, async_)
 

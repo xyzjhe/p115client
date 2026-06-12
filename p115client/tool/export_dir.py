@@ -609,9 +609,17 @@ def export_dir_parse_iter(
             file = client.open(url, async_=async_) # type: ignore
             try:
                 if async_:
-                    file_wrapper: IO = AsyncTextIOWrapper(AsyncBufferedReader(file), encoding="utf-16", newline="\n")
+                    file_wrapper: IO = AsyncTextIOWrapper(
+                        AsyncBufferedReader(file), # type: ignore
+                        encoding="utf-16", 
+                        newline="\n", 
+                    )
                 else:
-                    file_wrapper = TextIOWrapper(BufferedReader(file), encoding="utf-16", newline="\n")
+                    file_wrapper = TextIOWrapper(
+                        BufferedReader(file), # type: ignore
+                        encoding="utf-16", 
+                        newline="\n", 
+                    )
                 yield YieldFrom(parse_iter(file_wrapper)) # type: ignore
             finally:
                 if async_:

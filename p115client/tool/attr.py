@@ -1333,7 +1333,7 @@ def get_id(
             value = cast(str, value)
             if is_valid_pickcode(value):
                 return to_id(value)
-            elif is_valid_sha1(value):
+            elif ensure_file is not False and is_valid_sha1(value):
                 return get_id_to_sha1(
                     client, 
                     sha1=value, 
@@ -1473,7 +1473,7 @@ def get_id_to_path(
             if ensure_file:
                 raise error
             return cid
-        if not isinstance(client, P115Client) or app == "open":
+        if not dont_use_getid and (not isinstance(client, P115Client) or app == "open"):
             resp = yield get_info(
                 client, 
                 ">" + ">".join(patht), 
@@ -1514,7 +1514,7 @@ def get_id_to_path(
                         break
                 else:
                     stop += 1
-            if not dont_use_getid:
+            if not dont_use_getid and isinstance(client, P115Client):
                 while stop > i:
                     if app in ("", "web", "desktop", "aps"):
                         fs_dir_getid: Callable = client.fs_dir_getid

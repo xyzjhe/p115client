@@ -6,10 +6,11 @@ __all__ = [
     "ensure_attr_path", "ensure_attr_path_using_star_event", "iterdir", "iterdir_traverse", 
     "iterdir_walk", "iter_stared_dirs", "iter_dirs", "iter_dirs_with_path", "iter_files", 
     "iter_files_with_path", "iter_files_with_path_skim", "iter_files_shortcut", 
-    "iter_files_frament", "traverse_tree", "traverse_tree_with_path", 
-    "iter_nodes", "iter_nodes_skim", "iter_nodes_by_pickcode", "iter_nodes_using_update", 
+    "iter_files_frament", "traverse_tree", "traverse_tree_with_path", "iter_nodes", 
+    "iter_nodes_skim", "iter_nodes_by_pickcode", "iter_nodes_using_update", 
     "iter_nodes_using_info", "iter_nodes_using_event",  "iter_dir_nodes_using_star", 
-    "iter_parents", "iter_dupfiles", "iter_media_files", "search_iter", "share_iterdir", 
+    "iter_parents", "iter_dupfiles", "iter_dupfile_ids", "iter_dupfile_unique_keys", 
+    "get_dupfile_unique_keys", "iter_media_files", "search_iter", "share_iterdir", 
     "share_iterdir_traverse", "share_iterdir_walk", "share_iter_files", "share_search_iter", 
     "extract_iterdir", "extract_iterdir_traverse", "extract_iterdir_walk", "extract_iter_files", 
     "iter_id_to_dirnode", 
@@ -18,8 +19,8 @@ __doc__ = "这个模块提供了一些和目录信息罗列有关的函数"
 
 from asyncio import create_task, sleep as async_sleep, Task
 from collections.abc import (
-    AsyncIterable, AsyncIterator, Callable, Generator, Iterable, 
-    Iterator, Mapping, MutableMapping, Sequence, 
+    AsyncIterable, AsyncIterator, Callable, Coroutine, Generator, 
+    Iterable, Iterator, Mapping, MutableMapping, Sequence, 
 )
 from contextlib import contextmanager
 from concurrent.futures import Future
@@ -3238,7 +3239,7 @@ def iter_dupfiles[K](
     async_: Literal[False, True] = False, 
     **request_kwargs, 
 ) -> Iterator[tuple[K, dict]] | AsyncIterator[tuple[K, dict]]:
-    """遍历以迭代获得所有重复文件
+    """遍历以迭代获得所有重复文件信息
 
     :param client: 115 客户端或 cookies
     :param cid: 待被遍历的目录 id 或 pickcode
@@ -3275,6 +3276,189 @@ def iter_dupfiles[K](
         key=key, 
         keep_first=keep_first, 
     )
+
+
+@overload
+def iter_dupfile_ids(
+    client: str | PathLike | P115Client, 
+    cid: int | str | Mapping = 0, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[False] = False, 
+    **request_kwargs, 
+) -> Iterator[int]:
+    ...
+@overload
+def iter_dupfile_ids(
+    client: str | PathLike | P115Client, 
+    cid: int | str | Mapping = 0, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[True], 
+    **request_kwargs, 
+) -> AsyncIterator[int]:
+    ...
+def iter_dupfile_ids(
+    client: str | PathLike | P115Client, 
+    cid: int | str | Mapping = 0, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[False, True] = False, 
+    **request_kwargs, 
+) -> Iterator[int] | AsyncIterator[int]:
+    """获取重复文件的 id
+
+    .. tip::
+        会把从第 2 次开始遇到的所有重复文件 id 全部输出，因此只要你把输出的 id 所对应的文件全部删除，就可以完成实际的去重。
+        假如你需要更精确地确定重复文件中哪一个应该保留，请用 ``iter_dupfiles()`` 函数。
+
+    :param client: 115 客户端或 cookies
+    :param cid: 待被遍历的目录 id 或 pickcode
+    :param max_workers: 最大并发数，如果为 None 或 < 0 则自动确定，如果为 0 则单工作者惰性执行
+    :param async_: 是否异步
+    :param request_kwargs: 其它请求参数
+
+    :return: 迭代器，返回一组 id
+    """
+    from .download import iter_download_nodes
+    request_kwargs["app"] = "os_windows"
+    def gen_step():
+        seen: set[tuple[str, int]] = set()
+        add = seen.add
+        with with_iter_next(iter_download_nodes(
+            client, 
+            cid, 
+            files=True, 
+            get_raw=True, 
+            max_workers=max_workers, 
+            async_=async_, 
+            **request_kwargs, 
+        )) as get_next:
+            while True:
+                info = yield get_next()
+                key = (info["sha1"], info["fs"])
+                if key in seen:
+                    yield Yield(to_id(info["pc"]))
+                else:
+                    add(key)
+    return run_gen_step_iter(gen_step, async_)
+
+
+@overload
+def iter_dupfile_unique_keys(
+    client: str | PathLike | P115Client, 
+    cid: int | str | Mapping = 0, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[False] = False, 
+    **request_kwargs, 
+) -> Iterable[tuple[str, int]]:
+    ...
+@overload
+def iter_dupfile_unique_keys(
+    client: str | PathLike | P115Client, 
+    cid: int | str | Mapping = 0, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[True], 
+    **request_kwargs, 
+) -> AsyncIterable[tuple[str, int]]:
+    ...
+def iter_dupfile_unique_keys(
+    client: str | PathLike | P115Client, 
+    cid: int | str | Mapping = 0, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[False, True] = False, 
+    **request_kwargs, 
+) -> Iterable[tuple[str, int]] | AsyncIterable[tuple[str, int]]:
+    """获取某个目录中，所有不重复的 (sha1, size) 组合
+
+    :param client: 115 客户端或 cookies
+    :param cid: 待被遍历的目录 id 或 pickcode
+    :param max_workers: 最大并发数，如果为 None 或 < 0 则自动确定，如果为 0 则单工作者惰性执行
+    :param async_: 是否异步
+    :param request_kwargs: 其它请求参数
+
+    :return: 迭代器，返回 (sha1, size) 的组合
+    """
+    from .download import iter_download_nodes
+    request_kwargs["app"] = "os_windows"
+    def gen_step():
+        seen: set[tuple[str, int]] = set()
+        add = seen.add
+        with with_iter_next(iter_download_nodes(
+            client, 
+            cid, 
+            files=True, 
+            get_raw=True, 
+            max_workers=max_workers, 
+            async_=async_, 
+            **request_kwargs, 
+        )) as get_next:
+            while True:
+                info = yield get_next()
+                key = (info["sha1"], info["fs"])
+                if key not in seen:
+                    yield Yield(key)
+                    add(key)
+    return run_gen_step_iter(gen_step, async_)
+
+
+@overload
+def get_dupfile_unique_keys(
+    client: str | PathLike | P115Client, 
+    cid: int | str | Mapping = 0, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[False] = False, 
+    **request_kwargs, 
+) -> set[tuple[str, int]]:
+    ...
+@overload
+def get_dupfile_unique_keys(
+    client: str | PathLike | P115Client, 
+    cid: int | str | Mapping = 0, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[True], 
+    **request_kwargs, 
+) -> Coroutine[None, None, set[tuple[str, int]]]:
+    ...
+def get_dupfile_unique_keys(
+    client: str | PathLike | P115Client, 
+    cid: int | str | Mapping = 0, 
+    max_workers: None | int = None, 
+    *, 
+    async_: Literal[False, True] = False, 
+    **request_kwargs, 
+) -> set[tuple[str, int]] | Coroutine[None, None, set[tuple[str, int]]]:
+    """获取某个目录中，所有不重复的 (sha1, size) 集合
+
+    :param client: 115 客户端或 cookies
+    :param cid: 待被遍历的目录 id 或 pickcode
+    :param max_workers: 最大并发数，如果为 None 或 < 0 则自动确定，如果为 0 则单工作者惰性执行
+    :param async_: 是否异步
+    :param request_kwargs: 其它请求参数
+
+    :return: (sha1, size) 的集合
+    """
+    from .download import iter_download_nodes
+    request_kwargs["app"] = "os_windows"
+    it = iter_download_nodes(
+        client, 
+        cid, 
+        files=True, 
+        get_raw=True, 
+        max_workers=max_workers, 
+        async_=async_, 
+        **request_kwargs, 
+    )
+    if async_:
+        async def get():
+            return {(a["sha1"], a["fs"]) async for a in cast(AsyncIterable, it)}
+        return get()
+    return {(a["sha1"], a["fs"]) for a in cast(Iterable, it)}
 
 
 @overload

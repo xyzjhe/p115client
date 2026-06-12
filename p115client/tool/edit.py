@@ -5,23 +5,27 @@ __author__ = "ChenyangGao <https://chenyanggao.github.io>"
 __all__ = [
     "update_abstract", "update_desc", "update_star", "update_label", "update_score", 
     "update_top", "update_show_play_long", "update_category_shortcut", "batch_unstar", 
-    "update_name", "post_event", "batch_makedir", "copyfile", "renamefile", "transferfile", 
+    "update_name", "post_event", "iter_batch_makedir", "batch_makedir", "copyfile", 
+    "renamefile", "transferfile", 
 ]
 __doc__ = "这个模块提供了一些和修改文件或目录信息有关的函数"
 
 from asyncio import Future as AsyncFuture
 from collections.abc import (
     AsyncIterable, AsyncIterator, Callable, Coroutine, Iterable, 
-    Iterator, Mapping, 
+    Iterator, Mapping, MutableMapping, 
 )
 from concurrent.futures import Future
 from functools import partial
 from itertools import batched
 from os import PathLike
-from typing import overload, Any, Literal
+from typing import cast, overload, Any, Literal
 
 from concurrenttools import conmap, run_as_thread, run_as_async
-from iterutils import chunked, map as do_map, run_gen_step, as_gen_step, through
+from iterutils import (
+    chunked, map as do_map, run_gen_step, as_gen_step, 
+    through, 
+)
 from p115pickcode import to_id
 
 from ..client import check_response, P115Client, P115OpenClient
@@ -36,7 +40,7 @@ def update_abstract(
     method: str, 
     value: Any, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -50,7 +54,7 @@ def update_abstract(
     method: str, 
     value: Any, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -63,7 +67,7 @@ def update_abstract(
     method: str, 
     value: Any, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -101,7 +105,7 @@ def update_desc(
     /, 
     desc: str = "", 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False] = False, 
@@ -115,7 +119,7 @@ def update_desc(
     /, 
     desc: str = "", 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[True], 
@@ -128,7 +132,7 @@ def update_desc(
     /, 
     desc: str = "", 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False, True] = False, 
@@ -169,7 +173,7 @@ def update_star(
     /, 
     star: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False] = False, 
@@ -183,7 +187,7 @@ def update_star(
     /, 
     star: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[True], 
@@ -196,7 +200,7 @@ def update_star(
     /, 
     star: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False, True] = False, 
@@ -244,7 +248,7 @@ def update_label(
     /, 
     label: int | str = 1, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False] = False, 
@@ -258,7 +262,7 @@ def update_label(
     /, 
     label: int | str = 1, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[True], 
@@ -271,7 +275,7 @@ def update_label(
     /, 
     label: int | str = 1, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False, True] = False, 
@@ -312,7 +316,7 @@ def update_score(
     /, 
     score: int = 0, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -325,7 +329,7 @@ def update_score(
     /, 
     score: int = 0, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -337,7 +341,7 @@ def update_score(
     /, 
     score: int = 0, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -371,7 +375,7 @@ def update_top(
     /, 
     top: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -384,7 +388,7 @@ def update_top(
     /, 
     top: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -396,7 +400,7 @@ def update_top(
     /, 
     top: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -430,7 +434,7 @@ def update_show_play_long(
     /, 
     show: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False] = False, 
@@ -444,7 +448,7 @@ def update_show_play_long(
     /, 
     show: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[True], 
@@ -457,7 +461,7 @@ def update_show_play_long(
     /, 
     show: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False, True] = False, 
@@ -498,7 +502,7 @@ def update_category_shortcut(
     /, 
     set: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
@@ -511,7 +515,7 @@ def update_category_shortcut(
     /, 
     set: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
@@ -523,7 +527,7 @@ def update_category_shortcut(
     /, 
     set: bool = True, 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
@@ -556,7 +560,7 @@ def batch_unstar(
     /, 
     batch_size: int = 10_000, 
     ensure_file: None | bool = None, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False] = False, 
@@ -569,7 +573,7 @@ def batch_unstar(
     /, 
     batch_size: int = 10_000, 
     ensure_file: None | bool = None, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[True], 
@@ -581,7 +585,7 @@ def batch_unstar(
     /, 
     batch_size: int = 10_000, 
     ensure_file: None | bool = None, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "web", 
     *, 
     async_: Literal[False, True] = False, 
@@ -728,7 +732,7 @@ def post_event(
     /, 
     type: Literal["doc", "img"] = "doc", 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "android", 
     *, 
     async_: Literal[False] = False, 
@@ -742,7 +746,7 @@ def post_event(
     /, 
     type: Literal["doc", "img"] = "doc", 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "android", 
     *, 
     async_: Literal[True], 
@@ -755,7 +759,7 @@ def post_event(
     /, 
     type: Literal["doc", "img"] = "doc", 
     batch_size: int = 10_000, 
-    max_workers: None | int = None, 
+    max_workers: None | int = 0, 
     app: str = "android", 
     *, 
     async_: Literal[False, True] = False, 
@@ -800,48 +804,52 @@ def post_event(
 
 
 @overload
-def batch_makedir(
+def iter_batch_makedir(
     client: str | PathLike | P115Client, 
     pairs: Iterable[str | tuple[int | str, str]], 
     /, 
     pid: int | str = 0, 
     contain_dir: bool = False, 
-    max_workers: None | int = None, 
+    mapping: None | MutableMapping[tuple[int, str], dict] = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False] = False, 
     **request_kwargs, 
-) -> Iterator[tuple[str | tuple[int | str, str], dict]]:
+) -> Iterator[tuple[tuple[int, str], dict]]:
     ...
 @overload
-def batch_makedir(
+def iter_batch_makedir(
     client: str | PathLike | P115Client, 
     pairs: Iterable[str | tuple[int | str, str]], 
     /, 
     pid: int | str = 0, 
     contain_dir: bool = False, 
-    max_workers: None | int = None, 
+    mapping: None | MutableMapping[tuple[int, str], dict] = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[True], 
     **request_kwargs, 
-) -> AsyncIterator[tuple[str | tuple[int | str, str], dict]]:
+) -> AsyncIterator[tuple[tuple[int, str], dict]]:
     ...
-def batch_makedir(
+def iter_batch_makedir(
     client: str | PathLike | P115Client, 
     pairs: Iterable[str | tuple[int | str, str]], 
     /, 
     pid: int | str = 0, 
     contain_dir: bool = False, 
-    max_workers: None | int = None, 
+    mapping: None | MutableMapping[tuple[int, str], dict] = None, 
+    max_workers: None | int = 0, 
     *, 
     async_: Literal[False, True] = False, 
     **request_kwargs, 
-) -> Iterator[tuple[str | tuple[int | str, str], dict]] | AsyncIterator[tuple[str | tuple[int | str, str], dict]]:
+) -> Iterator[tuple[tuple[int, str], dict]] | AsyncIterator[tuple[tuple[int, str], dict]]:
     """批量创建目录
 
     :param client: 115 客户端或 cookies
     :param pairs: 一系列的 **名字或相对路径** 或者 (**目录的 id 或 pickcode**, **名字或相对路径**) 的 2 元组
     :param pid: 目录的 id 或 pickcode，如果输入的是 **名字或相对路径**，则创建在此目录下
     :param contain_dir: 如果为 True，则要创建的是相对路径，否则就是一个文件（即使其中包含 "/"）
+    :param mapping: 结果缓存，如果要创建的对象在此中，则会被跳过
     :param max_workers: 并发工作数，如果为 None 或者 <= 0，则自动确定
     :param async_: 是否异步
     :param request_kwargs: 其它请求参数
@@ -863,13 +871,119 @@ def batch_makedir(
         else:
             cid = pid
             name = pair
-        return pair, (yield makedir(name, pid=cid, async_=async_, **request_kwargs))
+        key = cast(tuple[int, str], (cid, name))
+        if mapping and key in mapping:
+            return mapping[key]
+        resp = yield makedir(name, pid=cid, async_=async_, **request_kwargs)
+        if mapping is not None:
+            mapping[key] = resp
+        return key, resp
     return conmap(
         call, 
         pairs, 
         max_workers=max_workers, 
         async_=async_, 
     )
+
+
+@overload
+def batch_makedir(
+    client: str | PathLike | P115Client, 
+    pairs: str | tuple[int, str] | Iterable[str | tuple[int | str, str]], 
+    /, 
+    pid: int | str = 0, 
+    contain_dir: bool = False, 
+    mapping: None | MutableMapping[tuple[int, str], dict] = None, 
+    max_workers: None | int = 0, 
+    *, 
+    async_: Literal[False] = False, 
+    **request_kwargs, 
+) -> MutableMapping[tuple[int, str], dict]:
+    ...
+@overload
+def batch_makedir(
+    client: str | PathLike | P115Client, 
+    pairs: str | tuple[int, str] | Iterable[str | tuple[int | str, str]], 
+    /, 
+    pid: int | str = 0, 
+    contain_dir: bool = False, 
+    mapping: None | MutableMapping[tuple[int, str], dict] = None, 
+    max_workers: None | int = 0, 
+    *, 
+    async_: Literal[True], 
+    **request_kwargs, 
+) -> Coroutine[None, None, MutableMapping[tuple[int, str], dict]]:
+    ...
+def batch_makedir(
+    client: str | PathLike | P115Client, 
+    pairs: str | tuple[int, str] | Iterable[str | tuple[int | str, str]], 
+    /, 
+    pid: int | str = 0, 
+    contain_dir: bool = False, 
+    mapping: None | MutableMapping[tuple[int, str], dict] = None, 
+    max_workers: None | int = 0, 
+    *, 
+    async_: Literal[False, True] = False, 
+    **request_kwargs, 
+) -> MutableMapping[tuple[int, str], dict] | Coroutine[None, None, MutableMapping[tuple[int, str], dict]]:
+    """批量创建目录
+
+    :param client: 115 客户端或 cookies
+    :param pairs: 一系列的 **名字或相对路径** 或者 (**目录的 id 或 pickcode**, **名字或相对路径**) 的 2 元组
+    :param pid: 目录的 id 或 pickcode 或 path，如果输入的是 **名字或相对路径**，则创建在此目录下
+    :param contain_dir: 如果为 True，则要创建的是相对路径，否则就是一个文件（即使其中包含 "/"）
+    :param mapping: 结果缓存，如果要创建的对象在此中，则会被跳过
+    :param max_workers: 并发工作数，如果为 None 或者 <= 0，则自动确定
+    :param async_: 是否异步
+    :param request_kwargs: 其它请求参数
+
+    :return: 迭代器，产生 (**每项输入**, **相应的接口响应**) 的 2 元组
+    """
+    if async_:
+        async def take(it, /):
+            async for _ in it: pass
+    else:
+        def take(it, /):
+            for _ in it: pass
+    if isinstance(client, (str, PathLike)):
+        client = P115Client(client, check_for_relogin=True)
+    if (isinstance(pairs, str) or 
+        isinstance(pairs, tuple) and 
+        len(pairs) == 2 and 
+        isinstance(pairs[0], int) and 
+        isinstance(pairs[1], str)
+    ):
+        pairs = pairs, # type: ignore
+    def gen_step():
+        nonlocal pid, mapping
+        if not isinstance(pid, int):
+            from .attr import get_id
+            try:
+                pid = yield get_id(
+                    client, 
+                    value=pid, 
+                    files=False, 
+                    async_=async_, 
+                    **request_kwargs, 
+                )
+            except FileNotFoundError:
+                resp = yield client.fs_makedirs_app(cast(str, pid), async_=async_, **request_kwargs)
+                check_response(resp)
+                pid = int(resp["cid"])
+        if mapping is None:
+            mapping = {}
+        take(iter_batch_makedir(
+            client, 
+            pairs, 
+            pid=pid, 
+            contain_dir=contain_dir, 
+            mapping=mapping, 
+            max_workers=max_workers, 
+            async_=async_, 
+            **request_kwargs, 
+        ))
+        return mapping
+    return run_gen_step(gen_step, async_)
 
 
 @overload
